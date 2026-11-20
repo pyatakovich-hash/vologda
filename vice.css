@@ -1,0 +1,53 @@
+/* Неоновая ночь 80-х: фиолетовые сумерки, розовый неон для акцентов, бирюза для активных кнопок.
+   Подключается после styles.css и переопределяет его переменные. */
+:root {
+  --sky: #1c0a33;
+  --paper: rgba(24, 8, 44, .9);
+  --ink: #fbeaff;
+  --muted: #c9a7e8;
+  --rule: #4a2a6a;
+  --red: #ff2d95;
+  --navy: #1fe5ff;
+  --neon-pink: #ff2d95;
+  --neon-cyan: #1fe5ff;
+}
+html, body { background: #1c0a33; }
+
+.veil-top { background: linear-gradient(rgba(14, 4, 30, .92) 30%, rgba(14, 4, 30, 0)); }
+.veil-bottom { background: linear-gradient(rgba(14, 4, 30, 0), rgba(14, 4, 30, .92) 55%); }
+
+/* Название — рукописный неон. */
+h1 { font-family: "Lobster", "PT Serif", Georgia, cursive; font-weight: 400; letter-spacing: .01em;
+  color: #ffe6f3; text-shadow: 0 0 6px var(--neon-pink), 0 0 18px var(--neon-pink), 0 0 36px rgba(255, 45, 149, .6); }
+.layrs { background: var(--neon-pink); color: #1c0a33; box-shadow: 0 0 14px rgba(255, 45, 149, .7); }
+.tally-year { color: #e9fdff; text-shadow: 0 0 6px var(--neon-cyan), 0 0 22px rgba(31, 229, 255, .7); }
+
+.modes { background: var(--paper); box-shadow: 0 0 0 1px rgba(255, 45, 149, .5), 0 0 18px rgba(255, 45, 149, .25); }
+.modes button[aria-pressed="true"] { background: var(--neon-cyan); color: #1c0a33; box-shadow: 0 0 12px rgba(31, 229, 255, .7); }
+
+.panel, .card, .about { box-shadow: 0 0 0 1px rgba(255, 45, 149, .45), 0 0 26px rgba(155, 92, 255, .25); backdrop-filter: blur(6px); }
+.swatch i { box-shadow: 0 0 8px currentColor; }
+.card-close { background: rgba(255, 45, 149, .2); color: var(--ink); }
+.about::backdrop { background: rgba(14, 4, 30, .7); }
+.w-stops button:hover { background: rgba(31, 229, 255, .12); }
+.quest .q-found { background: rgba(255, 45, 149, .12); }
+.q-tile p, .q-tile .q-progress, .w-stops .w-off b { color: var(--muted); }
+input, select, textarea { color: var(--ink); background-color: rgba(255, 255, 255, .06); }
+a { color: inherit; }
+
+/* Пасхалка: всплывающая плашка «Ночного заезда». */
+.vice-toast { position: fixed; left: 50%; bottom: 120px; transform: translateX(-50%); z-index: 50; pointer-events: none;
+  display: flex; flex-direction: column; gap: 4px; align-items: center; text-align: center;
+  padding: 14px 22px; border-radius: 12px; background: rgba(20, 2, 46, .88); color: #fff;
+  box-shadow: 0 0 0 1px var(--neon-pink), 0 0 30px rgba(255, 45, 149, .6), inset 0 0 18px rgba(31, 229, 255, .25);
+  animation: vice-in .5s ease-out; transition: opacity 1s, transform 1s; }
+.vice-toast b { font: 400 30px/1.1 "Lobster", cursive; color: #ffe6f3; text-shadow: 0 0 8px var(--neon-pink), 0 0 20px var(--neon-pink); }
+.vice-toast span { font-size: 15px; color: #e9fdff; text-shadow: 0 0 8px rgba(31, 229, 255, .8); }
+.vice-toast small { font-size: 12px; color: var(--muted); }
+.vice-toast.out { opacity: 0; transform: translateX(-50%) translateY(16px); }
+@keyframes vice-in { from { opacity: 0; transform: translateX(-50%) translateY(20px) scale(.96); } }
+body.vice-drive h1 { animation: vice-flicker 2.4s infinite; }
+@keyframes vice-flicker { 0%, 100% { opacity: 1; } 47% { opacity: 1; } 48% { opacity: .55; } 50% { opacity: 1; } 72% { opacity: .8; } 73% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .vice-toast, body.vice-drive h1 { animation: none; } }
+.howto { background: rgba(24, 8, 44, .75); color: var(--muted); }
+.walkcard .q-actions .w-kml:hover { background: rgba(31, 229, 255, .12); }
