@@ -22,7 +22,7 @@ const CAR_SCALE = 2.4;      // машины и люди крупнее наст�
 const PERSON_SCALE = 1.9;
 const SPAWN_RADIUS = 2600;  // м от центра: здесь машины и люди появляются, дальше просто уезжают
 
-const CACHE_KEY = 'vologda-vice-roads-v3';
+const CACHE_KEY = 'vologda-vice-roads-v4';
 const STYLE_URL = `https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json?key=${CARTO_KEY}`;
 const ROAD_ZOOM = 14;
 const SNAP = 2; // м: вершины ближе этого считаются одним перекрёстком
@@ -88,31 +88,79 @@ function merge(parts) {
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   return g;
 }
+// ---------- Советский автопарк: низкополигональные «Жигули», «Нива», «Волга», «Москвич», «буханка», «Ока», ПАЗик ----------
 // Кузов красится цветом экземпляра; фары и стоп-сигналы — отдельный меш со своим светом.
-function carGeometry() {
-  const parts = [
-    shadedBox(4.6, 0.75, 2.0, 0, 0.75, 0),             // нижняя часть кузова
-    shadedBox(4.4, 0.3, 1.94, 0.05, 1.27, 0, 0.92),    // пояс
-    shadedBox(2.2, 0.62, 1.78, -0.35, 1.72, 0, 0.9),   // крыша и стойки
-    shadedBox(2.0, 0.5, 1.82, -0.35, 1.7, 0, 0.22),    // стёкла
-    shadedBox(0.25, 0.2, 2.06, 2.3, 0.55, 0, 0.35),    // передний бампер
-    shadedBox(0.25, 0.2, 2.06, -2.3, 0.55, 0, 0.35),   // задний бампер
+const GLASS = 0.2, DARK = 0.12;
+function wheels(L, z, d, xs) {
+  return xs.flatMap(x => [z, -z].map(zz => shadedBox(d, d, 0.3, x, d / 2, zz, 0.09)));
+}
+function sedan({ L, W, low, lowY, cab, cabX, cabY, cabH, wheel, wx, grille = DARK, extra = [] }) {
+  return [
+    shadedBox(L, low, W, 0, lowY, 0),
+    shadedBox(L - 0.2, 0.16, W - 0.04, 0, lowY + low / 2 + 0.08, 0, 0.9),
+    shadedBox(cab, cabH, W - 0.12, cabX, lowY + low / 2 + 0.16 + cabH / 2, 0, 0.95),
+    shadedBox(cab - 0.15, cabH - 0.12, W - 0.08, cabX, lowY + low / 2 + 0.14 + cabH / 2, 0, GLASS),
+    shadedBox(0.06, 0.2, W * 0.66, L / 2 + 0.01, lowY + 0.08, 0, grille),
+    shadedBox(0.16, 0.13, W + 0.06, L / 2 + 0.02, lowY - low / 2 + 0.1, 0, 1.15, [0.85, 0.85, 0.92]),
+    shadedBox(0.16, 0.13, W + 0.06, -L / 2 - 0.02, lowY - low / 2 + 0.1, 0, 1.15, [0.85, 0.85, 0.92]),
+    ...wheels(L, W / 2 - 0.02, wheel, wx),
+    ...extra,
   ];
-  for (const x of [1.45, -1.45]) for (const z of [0.95, -0.95]) parts.push(shadedBox(0.82, 0.82, 0.32, x, 0.41, z, 0.09)); // колёса
-  const g = merge(parts);
-  g.scale(CAR_SCALE, CAR_SCALE, CAR_SCALE);
-  return g;
 }
-function carLightsGeometry() {
+function lightsGeo(L, W, yF, yR) {
   const parts = [];
-  for (const z of [0.62, -0.62]) {
-    parts.push(shadedBox(0.08, 0.22, 0.42, 2.33, 0.95, z, 1.6, [1, 0.97, 0.85])); // фары
-    parts.push(shadedBox(0.08, 0.2, 0.46, -2.33, 0.98, z, 1.6, [1, 0.08, 0.15])); // стоп-сигналы
+  for (const z of [W * 0.34, -W * 0.34]) {
+    parts.push(shadedBox(0.08, 0.2, 0.34, L / 2 + 0.03, yF, z, 1.6, [1, 0.97, 0.85]));
+    parts.push(shadedBox(0.08, 0.18, 0.4, -L / 2 - 0.03, yR, z, 1.6, [1, 0.08, 0.15]));
   }
+  return parts;
+}
+const SOVIET = ['#e9e4d4', '#8c1c2c', '#2e5f94', '#c8b27a', '#4a2c5a', '#2a7a64', '#d9d2c0', '#6b1f1f', '#1f2a3a', NEON.pink, NEON.cyan];
+const CAR_TYPES = [
+  { name: 'Жигули', weight: 0.34, colors: SOVIET, L: 4.1,
+    parts: () => sedan({ L: 4.1, W: 1.62, low: 0.62, lowY: 0.66, cab: 1.95, cabX: -0.2, cabY: 0, cabH: 0.5, wheel: 0.66, wx: [1.25, -1.25] }),
+    lights: () => lightsGeo(4.1, 1.62, 0.8, 0.85) },
+  { name: 'Нива', weight: 0.14, colors: ['#e9e4d4', '#2a7a64', '#c8b27a', '#8c1c2c', '#3a5a2a', '#2e5f94'], L: 3.74,
+    parts: () => sedan({ L: 3.74, W: 1.68, low: 0.78, lowY: 0.82, cab: 2.25, cabX: -0.5, cabY: 0, cabH: 0.55, wheel: 0.8, wx: [1.12, -1.12], grille: 0.2 }),
+    lights: () => lightsGeo(3.74, 1.68, 0.98, 1.0) },
+  { name: 'Волга', weight: 0.14, colors: ['#1f2a3a', '#e9e4d4', '#f0c419', '#2e5f94', '#4a2c5a', '#6b1f1f'], L: 4.73,
+    parts: () => sedan({ L: 4.73, W: 1.8, low: 0.62, lowY: 0.64, cab: 2.25, cabX: -0.15, cabY: 0, cabH: 0.5, wheel: 0.7, wx: [1.42, -1.42], grille: 1.2 }),
+    lights: () => lightsGeo(4.73, 1.8, 0.78, 0.8) },
+  { name: 'Москвич', weight: 0.12, colors: SOVIET, L: 4.1,
+    parts: () => sedan({ L: 4.1, W: 1.55, low: 0.64, lowY: 0.66, cab: 2.0, cabX: -0.3, cabY: 0, cabH: 0.5, wheel: 0.64, wx: [1.22, -1.22] }),
+    lights: () => lightsGeo(4.1, 1.55, 0.82, 0.86) },
+  { name: 'УАЗ «буханка»', weight: 0.1, colors: ['#6f7d3b', '#d8d2c2', '#2e5f94', '#5a6a2e'], L: 4.36,
+    parts: () => [
+      shadedBox(4.36, 1.55, 1.94, 0, 1.18, 0),
+      shadedBox(4.2, 0.14, 1.8, 0, 2.0, 0, 1.05),
+      shadedBox(0.06, 0.55, 1.7, 2.19, 1.62, 0, GLASS),
+      shadedBox(2.9, 0.45, 1.98, -0.45, 1.62, 0, GLASS),
+      shadedBox(0.14, 0.16, 2.0, 2.22, 0.5, 0, DARK),
+      ...wheels(4.36, 0.86, 0.8, [1.3, -1.3]),
+    ],
+    lights: () => lightsGeo(4.36, 1.94, 1.0, 1.05) },
+  { name: 'Ока', weight: 0.08, colors: ['#ff8a2a', '#3fb4e0', '#e94a7a', '#e9e4d4', '#8fd14f'], L: 3.2,
+    parts: () => sedan({ L: 3.2, W: 1.42, low: 0.6, lowY: 0.58, cab: 1.75, cabX: -0.2, cabY: 0, cabH: 0.5, wheel: 0.56, wx: [0.98, -0.98] }),
+    lights: () => lightsGeo(3.2, 1.42, 0.72, 0.76) },
+  { name: 'ПАЗ', weight: 0.08, colors: ['#f0c419', '#e9e4d4', '#e46a1f', '#2e5f94'], L: 7.0,
+    parts: () => [
+      shadedBox(7.0, 1.95, 2.4, 0, 1.38, 0),
+      shadedBox(6.8, 0.14, 2.3, 0, 2.42, 0, 1.05),
+      shadedBox(5.9, 0.75, 2.44, -0.3, 1.85, 0, GLASS),
+      shadedBox(0.06, 1.0, 2.2, 3.51, 1.75, 0, GLASS),
+      shadedBox(6.95, 0.16, 2.42, 0, 1.2, 0, 0.7),
+      shadedBox(0.16, 0.2, 2.44, 3.52, 0.5, 0, DARK),
+      ...wheels(7.0, 1.06, 0.95, [2.4, -2.4]),
+    ],
+    lights: () => lightsGeo(7.0, 2.4, 0.9, 1.0) },
+];
+function scaled(parts) {
   const g = merge(parts);
   g.scale(CAR_SCALE, CAR_SCALE, CAR_SCALE);
   return g;
 }
+function carGeometry(t = 0) { return scaled(CAR_TYPES[t].parts()); }
+function carLightsGeometry(t = 0) { return scaled(CAR_TYPES[t].lights()); }
 // Рубашка и руки красятся цветом экземпляра; джинсы, лицо и волосы — свои.
 function shirtGeometry() {
   const g = merge([
@@ -159,7 +207,7 @@ function palmLeavesGeometry() {
 }
 
 // ---------- Улицы: мини-декодер Mapbox Vector Tile (protobuf) ----------
-function readMVT(buf) {
+export function readMVT(buf) {
   const u8 = new Uint8Array(buf);
   let pos = 0;
   const varint = () => { let r = 0, s = 0, b; do { b = u8[pos++]; r += (b & 0x7f) * 2 ** s; s += 7; } while (b & 0x80); return r; };
@@ -239,13 +287,50 @@ async function fetchRoads(origin) {
   const jobs = [];
   for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) jobs.push([x, y]);
 
-  const ways = [];
+  const ways = [], water = [], shops = new Map();
   await Promise.all(jobs.map(async ([x, y]) => {
     let layers;
     try {
       const url = template.replace('{z}', z).replace('{x}', x).replace('{y}', y);
       layers = readMVT(await fetch(url).then(r => r.arrayBuffer()));
     } catch { return; }
+    const toLocal = (L, tx, ty) => {
+      const lon = (x + tx / L.extent) / n2 * 360 - 180;
+      const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + ty / L.extent) / n2))) * 180 / Math.PI;
+      const [e, n] = proj4('EPSG:4326', 'EPSG:32637', [lon, lat]);
+      return [Math.round((e - origin[0]) * 10) / 10, Math.round((origin[1] - n) * 10) / 10];
+    };
+    const tagsOf = (L, F) => { const t = {}; for (let i = 0; i < F.tags.length; i += 2) t[L.keys[F.tags[i]]] = L.values[F.tags[i + 1]]; return t; };
+    // Вода: полигоны; рёбра по краю тайла (обрезка) — не берег, набережную на них не строим.
+    const W = layers.find(l => l.name === 'water');
+    for (const F of W ? W.features : []) {
+      if (F.type !== 3) continue;
+      let poly = null;
+      for (const ring of lines(F.geom)) {
+        if (ring.length < 6) continue;
+        let area = 0;
+        for (let i = 0; i < ring.length; i += 2) { const j = (i + 2) % ring.length; area += ring[i] * ring[j + 1] - ring[j] * ring[i + 1]; }
+        const pts = [], edges = [];
+        for (let i = 0; i < ring.length; i += 2) pts.push(...toLocal(W, ring[i], ring[i + 1]));
+        for (let i = 0; i < ring.length; i += 2) {
+          const j = (i + 2) % ring.length, ax = ring[i], ay = ring[i + 1], bx = ring[j], by = ring[j + 1], e = W.extent;
+          const cut = (ax <= 0 && bx <= 0) || (ax >= e && bx >= e) || (ay <= 0 && by <= 0) || (ay >= e && by >= e);
+          if (!cut) edges.push(pts[i], pts[i + 1], pts[j], pts[j + 1]);
+        }
+        if (area > 0 || !poly) { poly = { outer: pts, holes: [], edges }; water.push(poly); }
+        else { poly.holes.push(pts); poly.edges.push(...edges); }
+      }
+    }
+    // Магазины: супермаркеты и магазины у дома с названием.
+    const P = layers.find(l => l.name === 'pois');
+    for (const F of P ? P.features : []) {
+      const t = tagsOf(P, F);
+      if (!t.name || !/^(supermarket|convenience|alcohol|department_store|mall|deli|greengrocer|butcher)$/.test(t.kind || '')) continue;
+      const pt = lines(F.geom)[0];
+      if (!pt) continue;
+      const [px, pz] = toLocal(P, pt[0], pt[1]);
+      shops.set(`${t.name}|${Math.round(px / 20)}|${Math.round(pz / 20)}`, { name: t.name, kind: t.kind, x: px, z: pz });
+    }
     const L = layers.find(l => l.name === 'roads');
     if (!L) return;
     for (const F of L.features) {
@@ -272,8 +357,9 @@ async function fetchRoads(origin) {
     }
   }));
   if (!ways.length) return null;
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify(ways)); } catch { /* слишком большой кэш — не страшно */ }
-  return ways;
+  const data = { ways, water, shops: [...shops.values()] };
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch { /* слишком большой кэш — не страшно */ }
+  return data;
 }
 
 function buildNetwork(ways) {
@@ -545,6 +631,88 @@ function signTexture(text, color) {
   return tex;
 }
 
+// ---------- Вода и набережные ----------
+// Зеркало воды ложится на рельеф на 1,2 м ниже берега; набережная — гранитная стенка с неоновым ограждением.
+function waterGeometry(polys, H) {
+  const pos = [], idx = [];
+  for (const P of polys) {
+    const ring = pts => { const v = []; for (let i = 0; i < pts.length; i += 2) v.push(new THREE.Vector2(pts[i], pts[i + 1])); return v; };
+    const outer = ring(P.outer), holes = P.holes.map(ring);
+    let tris;
+    try { tris = THREE.ShapeUtils.triangulateShape(outer, holes); } catch { continue; }
+    const all = outer.concat(...holes), base = pos.length / 3;
+    for (const v of all) pos.push(v.x, H(v.x, v.y) - 1.2, v.y);
+    for (const t of tris) idx.push(base + t[0], base + t[1], base + t[2]);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  return g;
+}
+function embankmentGeometry(polys, H) {
+  const pos = [], col = [], idx = [];
+  const quad = (a, b, c2, d, rgb) => {
+    const i = pos.length / 3;
+    pos.push(...a, ...b, ...c2, ...d);
+    for (let k = 0; k < 4; k++) col.push(...rgb);
+    idx.push(i, i + 1, i + 2, i, i + 2, i + 3);
+  };
+  for (const P of polys) {
+    const e = P.edges;
+    for (let k = 0; k < e.length; k += 4) {
+      const ax = e[k], az = e[k + 1], bx = e[k + 2], bz = e[k + 3], L = Math.hypot(bx - ax, bz - az);
+      if (L < 0.5) continue;
+      const parts = Math.ceil(L / 15), nx = -(bz - az) / L, nz = (bx - ax) / L;
+      const shade = 0.75 + 0.25 * Math.abs(nx * 0.6 + nz * 0.8);
+      const granite = [0.42 * shade, 0.36 * shade, 0.5 * shade], cap = [0.62, 0.56, 0.7];
+      const rail = Math.abs(nx) > Math.abs(nz) ? [0.12, 0.9, 1.0] : [1.0, 0.18, 0.58];
+      for (let j = 0; j < parts; j++) {
+        const x0 = ax + (bx - ax) * j / parts, z0 = az + (bz - az) * j / parts;
+        const x1 = ax + (bx - ax) * (j + 1) / parts, z1 = az + (bz - az) * (j + 1) / parts;
+        const h0 = H(x0, z0), h1 = H(x1, z1);
+        quad([x0, h0 - 2.4, z0], [x1, h1 - 2.4, z1], [x1, h1 + 1.0, z1], [x0, h0 + 1.0, z0], granite);         // стенка
+        quad([x0 - nx * 1.6, h0 + 1.0, z0 - nz * 1.6], [x1 - nx * 1.6, h1 + 1.0, z1 - nz * 1.6],
+             [x1 + nx * 1.6, h1 + 1.0, z1 + nz * 1.6], [x0 + nx * 1.6, h0 + 1.0, z0 + nz * 1.6], cap);           // парапет
+        quad([x0, h0 + 1.0, z0], [x1, h1 + 1.0, z1], [x1, h1 + 1.9, z1], [x0, h0 + 1.9, z0], rail);            // ограждение
+      }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setIndex(idx);
+  return g;
+}
+// Рябь с неоновыми бликами по воде.
+function waterShader(sh) {
+  sh.vertexShader = 'varying vec3 vP;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vP = position;');
+  sh.fragmentShader = 'varying vec3 vP;\nuniform float uT;\n' + sh.fragmentShader.replace(/}\s*$/, `
+  float w1 = sin(vP.x * 0.09 + uT * 0.9) * sin(vP.z * 0.13 - uT * 0.7);
+  float w2 = sin((vP.x + vP.z) * 0.21 - uT * 1.4);
+  float g = smoothstep(0.86, 1.0, w1) + smoothstep(0.93, 1.0, w2) * 0.6;
+  gl_FragColor.rgb += mix(vec3(1.0, 0.2, 0.6), vec3(0.2, 0.95, 1.0), step(0.0, w2)) * g * 0.55;
+}`);
+  sh.uniforms.uT = sh.uniforms.uT || { value: 0 };
+}
+// Вывеска: название магазина как в данных OSM, неоном; фирменные логотипы не воспроизводим.
+function shopTexture(name, color) {
+  const c = document.createElement('canvas');
+  c.width = 1024; c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = 'rgba(12, 4, 28, 0.82)';
+  ctx.fillRect(8, 24, 1008, 208);
+  ctx.strokeStyle = color; ctx.lineWidth = 8; ctx.shadowColor = color; ctx.shadowBlur = 24;
+  ctx.strokeRect(12, 28, 1000, 200);
+  ctx.font = '800 120px Onest, Arial, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(name, 512, 132, 940);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
 // ---------- Сборка ----------
 export function tintBasemap(group) {
   group?.traverse(m => m.material?.color?.setRGB(2.6, 1.4, 3.6));
@@ -564,19 +732,32 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
   const basic = () => new THREE.MeshBasicMaterial({ vertexColors: true });
   const additive = color => new THREE.MeshBasicMaterial({ map: glowTex, color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
   const glowTex = radialTexture();
-  const cars = new THREE.InstancedMesh(carGeometry(), basic(), N_CARS);
-  const lights = new THREE.InstancedMesh(carLightsGeometry(), basic(), N_CARS);
+  // Распределяем машины по моделям; у каждой модели свой меш кузова и фар.
+  const typeOf = [], typeIdx = [], typeCount = CAR_TYPES.map(() => 0);
+  {
+    let acc = 0, t = 0;
+    const cum = CAR_TYPES.map(T => (acc += T.weight));
+    for (let i = 0; i < N_CARS; i++) {
+      const r = (i + 0.5) / N_CARS * acc;
+      t = cum.findIndex(c => r <= c);
+      typeOf.push(t); typeIdx.push(typeCount[t]++);
+    }
+  }
+  const carMeshes = CAR_TYPES.map((T, t) => new THREE.InstancedMesh(carGeometry(t), basic(), Math.max(1, typeCount[t])));
+  const lightMeshes = CAR_TYPES.map((T, t) => new THREE.InstancedMesh(carLightsGeometry(t), basic(), Math.max(1, typeCount[t])));
   const glow = new THREE.InstancedMesh(new THREE.PlaneGeometry(16, 9).rotateX(-Math.PI / 2), additive(0xffffff), N_CARS);
   glow.material.opacity = 0.85;
   const shirts = new THREE.InstancedMesh(shirtGeometry(), basic(), N_PEOPLE);
   const bodies = new THREE.InstancedMesh(personBaseGeometry(), basic(), N_PEOPLE);
   const c = new THREE.Color();
   for (let i = 0; i < N_CARS; i++) {
-    cars.setColorAt(i, c.set(CAR_COLORS[i % CAR_COLORS.length]));
+    const T = CAR_TYPES[typeOf[i]];
+    carMeshes[typeOf[i]].setColorAt(typeIdx[i], c.set(T.colors[(i * 7) % T.colors.length]));
     glow.setColorAt(i, c.set(GLOW_COLORS[i % GLOW_COLORS.length]));
   }
   for (let i = 0; i < N_PEOPLE; i++) shirts.setColorAt(i, c.set(SHIRTS[i % SHIRTS.length]));
-  for (const m of [cars, lights, glow, shirts, bodies]) { m.count = 0; m.frustumCulled = false; group.add(m); }
+  const moving = [...carMeshes, ...lightMeshes, glow, shirts, bodies];
+  for (const m of moving) { m.count = 0; m.frustumCulled = false; group.add(m); }
   glow.renderOrder = 1;
 
   // ---------- Карта занятости: где стоят дома (по крышам зданий, клетка 2 м) ----------
@@ -708,22 +889,61 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
   }
 
   let net = null, agents = [], last = 0, drive = false, propsDone = false, lastShout = 0;
-  fetchRoads(config.origin).then(ways => {
+  let waterMat = null, shopData = [];
+  fetchRoads(config.origin).then(data => {
+    const ways = data?.ways;
     if (!ways || !ways.length) { console.warn('vice: улицы не загрузились, машин не будет'); return; }
     net = buildNetwork(ways);
     agents = [
       ...Array.from({ length: N_CARS }, () => spawn(net, true)),
       ...Array.from({ length: N_PEOPLE }, () => spawn(net, false)),
     ];
-    cars.count = lights.count = glow.count = N_CARS;
+    carMeshes.forEach((m, t) => { m.count = lightMeshes[t].count = typeCount[t]; });
+    glow.count = N_CARS;
     shirts.count = bodies.count = N_PEOPLE;
+    shopData = data.shops || [];
     Promise.resolve(terrainP).then(() => {
+      // Порядок: подложка (−3) → вода (−2) → дороги (−1): подложка не пишет глубину, поэтому не перекрывает их на склонах.
       const roads = new THREE.Mesh(roadGeometry(ways, H), new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
       roads.renderOrder = -1;
       group.add(roads);
+      const wg = waterGeometry(data.water || [], H);
+      waterMat = new THREE.MeshBasicMaterial({ color: '#1b3f9a', side: THREE.DoubleSide, depthWrite: false });
+      waterMat.onBeforeCompile = sh => { sh.uniforms.uT = { value: 0 }; waterMat.userData.shader = sh; waterShader(sh); };
+      const waterMesh = new THREE.Mesh(wg, waterMat);
+      waterMesh.renderOrder = -2;
+      group.add(waterMesh, new THREE.Mesh(embankmentGeometry(data.water || [], H), basic()));
+      console.log(`vice: ${(data.water || []).length} водоёмов, ${shopData.length} магазинов`);
     });
     console.log(`vice: ${ways.length} улиц, ${N_CARS} машин, ${N_PEOPLE} пешеходов`);
   });
+
+  // ---------- Вывески магазинов: настоящие точки из OpenStreetMap, оформление своё ----------
+  function placeShops() {
+    if (!shopData.length || !net) return;
+    const texCache = new Map(), signs = [];
+    const near = shopData.filter(sh => Math.hypot(sh.x, sh.z) < SPAWN_RADIUS + 600).slice(0, 180);
+    near.forEach((sh, i) => {
+      const v = nearestVertex(sh.x, sh.z, w => !w.f);
+      const rx = v ? v.w.p[2 * v.i] - sh.x : 1, rz = v ? v.w.p[2 * v.i + 1] - sh.z : 0;
+      const color = [NEON.pink, NEON.cyan, NEON.yellow, NEON.orange, '#7dffb2'][i % 5];
+      const key = sh.name + color;
+      if (!texCache.has(key)) texCache.set(key, shopTexture(sh.name, color));
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(16, 4), new THREE.MeshBasicMaterial({ map: texCache.get(key), transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+      // Вывеска чуть ближе к дороге, лицом к ней, на высоте второго этажа.
+      const d = Math.hypot(rx, rz) || 1, px = sh.x + rx / d * Math.min(6, d * 0.4), pz = sh.z + rz / d * Math.min(6, d * 0.4);
+      m.position.set(px, H(px, pz) + 6.5, pz);
+      m.rotation.y = Math.atan2(rx, rz);
+      group.add(m);
+      signs.push([px, pz, color]);
+    });
+    // Пятно света под каждой вывеской.
+    const pools = new THREE.InstancedMesh(new THREE.PlaneGeometry(14, 14).rotateX(-Math.PI / 2), additive(0xffffff), Math.max(1, signs.length));
+    pools.material.opacity = 0.5;
+    signs.forEach(([x, z, col], i) => { o.position.set(x, H(x, z) + 0.2, z); o.rotation.set(0, 0, 0); o.scale.setScalar(1); o.updateMatrix(); pools.setMatrixAt(i, o.matrix); pools.setColorAt(i, c.set(col)); });
+    pools.frustumCulled = false;
+    group.add(pools);
+  }
   const SHOUTS = ['Эй! Тут вообще-то тротуар!', 'Права купил, что ли?!', 'Масло своё вези аккуратнее!', 'Я в «Кружево FM» позвоню!', 'Совсем уже, 1147 год на дворе!'];
 
   const o = new THREE.Object3D();
@@ -731,7 +951,8 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
     const t = now / 1000, dt = Math.min(0.1, last ? t - last : 0);
     last = t;
     if (!net) return;
-    if (!propsDone && terrainSettled && document.getElementById('loading')?.hidden) { propsDone = true; buildGrid(); placeProps(); placeLandmarks(); }
+    if (!propsDone && terrainSettled && document.getElementById('loading')?.hidden) { propsDone = true; buildGrid(); placeProps(); placeLandmarks(); placeShops(); }
+    if (waterMat?.userData.shader) waterMat.userData.shader.uniforms.uT.value = t;
     if (game.driving) driveStep(dt, t);
     const boost = drive ? 3 : 1, px = pos.x, pz = pos.y, pspeed = game.driving ? vel.length() : 0;
     for (let k = 0; k < agents.length; k++) {
@@ -745,8 +966,8 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
         o.rotation.set(0, p.ang, 0);
         o.scale.setScalar(1);
         o.updateMatrix();
-        cars.setMatrixAt(k, o.matrix);
-        lights.setMatrixAt(k, o.matrix);
+        carMeshes[typeOf[k]].setMatrixAt(typeIdx[k], o.matrix);
+        lightMeshes[typeOf[k]].setMatrixAt(typeIdx[k], o.matrix);
         o.position.y = gy + 0.25;
         o.scale.setScalar(drive ? 1.7 : 1);
         o.updateMatrix();
@@ -781,7 +1002,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
         bodies.setMatrixAt(k - N_CARS, o.matrix);
       }
     }
-    for (const m of [cars, lights, glow, shirts, bodies]) m.instanceMatrix.needsUpdate = true;
+    for (const m of moving) m.instanceMatrix.needsUpdate = true;
   }
 
   // ---------- Своя машина и задание «Масло в Кремль» ----------
@@ -805,7 +1026,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
   const pos = new THREE.Vector2(), vel = new THREE.Vector2();
   let ang = 0, money = 0, mission = null, shake = 0, lastBump = 0;
   // Углы машины игрока (длина ~11 м, ширина ~4,8 м) плюс середины бортов.
-  const PROBES = [[5.2, 2.1], [5.2, -2.1], [-5.2, 2.1], [-5.2, -2.1], [0, 2.2], [0, -2.2], [5.4, 0]];
+  const PROBES = [[4.8, 1.8], [4.8, -1.8], [-4.8, 1.8], [-4.8, -1.8], [0, 1.95], [0, -1.95], [5.0, 0]];
   function hits(x, z, a) {
     const fx = Math.cos(a), fz = -Math.sin(a);
     for (const [l, w] of PROBES) if (blocked(x + fx * l - fz * w, z + fz * l + fx * w)) return true;

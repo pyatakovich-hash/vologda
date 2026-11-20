@@ -43,8 +43,8 @@ async function loadTileTexture(loader, z, x, y) {
   });
 }
 
-// Плитка — сетка 16×16, чтобы потом лечь на рельеф (terrain.js → drapeBasemap).
-function makeTileMesh(b, texture, origin, S = 16) {
+// Плитка — сетка 32×32, чтобы потом лечь на рельеф (terrain.js → drapeBasemap).
+function makeTileMesh(b, texture, origin, S = 32) {
   const c0 = toLocal(b.minx, b.miny, origin), c1 = toLocal(b.maxx, b.miny, origin);
   const c2 = toLocal(b.maxx, b.maxy, origin), c3 = toLocal(b.minx, b.maxy, origin);
   const pos = [], uv = [], idx = [];
@@ -64,7 +64,9 @@ function makeTileMesh(b, texture, origin, S = 16) {
   geom.setIndex(idx);
   texture.colorSpace = THREE.SRGBColorSpace;
   const mat = new THREE.MeshBasicMaterial({ map: texture, depthWrite: false, toneMapped: false });
-  return new THREE.Mesh(geom, mat);
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.renderOrder = -3; // раньше воды и дорог: подложка не пишет глубину и не должна их перекрывать
+  return mesh;
 }
 
 /** @param {THREE.Group} flat — группа земли/воды */
