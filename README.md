@@ -6,4 +6,4 @@
 
 Сайт статический: файлы из корня репозитория раздаются через GitHub Pages. Локально — `python -m http.server 8643` в этой папке.
 
-Подложка и улицы — © OpenStreetMap contributors, © CARTO. Основано на проекте LAYRS (лицензия MIT, см. LICENSE).
+Подложка и улицы — © OpenStreetMap contributors, © CARTO. Рельеф — Terrarium (Mapzen, AWS Open Data). Основано на проекте LAYRS (лицензия MIT, см. LICENSE).

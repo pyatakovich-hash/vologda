@@ -460,7 +460,7 @@ function toast(html) {
 }
 
 // ---------- Дороги: асфальт, неоновые бровки, прерывистая осевая ----------
-function roadGeometry(ways) {
+function roadGeometry(ways, H = () => 0) {
   const pos = [], col = [], idx = [];
   const quad = (ax, az, bx, bz, half, y, rgb, ext = 0) => {
     const L = Math.hypot(bx - ax, bz - az);
@@ -468,7 +468,8 @@ function roadGeometry(ways) {
     const fx = (bx - ax) / L, fz = (bz - az) / L, rx = -fz * half, rz = fx * half;
     const sx = ax - fx * ext, sz = az - fz * ext, ex = bx + fx * ext, ez = bz + fz * ext;
     const i = pos.length / 3;
-    pos.push(sx + rx, y, sz + rz, sx - rx, y, sz - rz, ex - rx, y, ez - rz, ex + rx, y, ez + rz);
+    pos.push(sx + rx, y + H(sx + rx, sz + rz), sz + rz, sx - rx, y + H(sx - rx, sz - rz), sz - rz,
+      ex - rx, y + H(ex - rx, ez - rz), ez - rz, ex + rx, y + H(ex + rx, ez + rz), ez + rz);
     for (let k = 0; k < 4; k++) col.push(...rgb);
     idx.push(i, i + 2, i + 1, i, i + 3, i + 2);
   };
@@ -476,8 +477,14 @@ function roadGeometry(ways) {
   const EDGE = [[0.12, 0.9, 1.0], [1.0, 0.18, 0.58]], DASH = [1.0, 0.89, 0.36];
   for (const w of ways) {
     const width = w.k === 2 ? 15 : w.k === 1 ? 8.5 : 2.6;
+    // Длинные отрезки режем по 25 м, чтобы лента повторяла рельеф.
+    const pts = [w.p[0], w.p[1]];
     for (let i = 2; i < w.p.length; i += 2) {
-      const ax = w.p[i - 2], az = w.p[i - 1], bx = w.p[i], bz = w.p[i + 1];
+      const ax = w.p[i - 2], az = w.p[i - 1], bx = w.p[i], bz = w.p[i + 1], parts = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / 25));
+      for (let k = 1; k <= parts; k++) pts.push(ax + (bx - ax) * k / parts, az + (bz - az) * k / parts);
+    }
+    for (let i = 2; i < pts.length; i += 2) {
+      const ax = pts[i - 2], az = pts[i - 1], bx = pts[i], bz = pts[i + 1];
       quad(ax, az, bx, bz, width / 2, w.k ? 0.04 : 0.03, w.k ? ASPHALT : WALK, width / 2);
       if (!w.k) continue;
       const L = Math.hypot(bx - ax, bz - az), fx = (bx - ax) / L, fz = (bz - az) / L, rx = -fz, rz = fx;
@@ -543,7 +550,10 @@ export function tintBasemap(group) {
   group?.traverse(m => m.material?.color?.setRGB(2.6, 1.4, 3.6));
 }
 
-export function initVice(scene, config, camera, controls, getMeshes = () => [], getBuilding = () => null) {
+export function initVice(scene, config, camera, controls, getMeshes = () => [], getBuilding = () => null, terrainP = null) {
+  // Высота рельефа в точке (terrain.js); пока рельеф не загрузился — 0.
+  let H = () => 0, terrainSettled = !terrainP;
+  terrainP?.then(t => { if (t) H = t.H; terrainSettled = true; });
   const sky = { dusk: gradientTexture(SKY_DUSK), drive: gradientTexture(SKY_NIGHT_DRIVE) };
   scene.background = sky.dusk;
 
@@ -635,7 +645,8 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
     const leaves = new THREE.InstancedMesh(palmLeavesGeometry(), basic(), palmsN);
     let li = 0, pi = 0;
     spots.forEach((sp, k) => {
-      o.position.set(sp.x, 0, sp.z);
+      const gy = H(sp.x, sp.z);
+      o.position.set(sp.x, gy, sp.z);
       o.rotation.set(0, sp.ang, 0);
       o.scale.setScalar(k % 2 ? 1 : 0.9 + Math.random() * 0.3);
       o.updateMatrix();
@@ -645,7 +656,8 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
         const col = [NEON.pink, NEON.cyan, NEON.purple][li % 3];
         heads.setColorAt(li, c.set(col));
         pools.setColorAt(li, c.set(col));
-        o.position.set(sp.x + Math.cos(sp.ang) * 2.4, 0.18, sp.z - Math.sin(sp.ang) * 2.4);
+        o.position.set(sp.x + Math.cos(sp.ang) * 2.4, 0, sp.z - Math.sin(sp.ang) * 2.4);
+        o.position.y = H(o.position.x, o.position.z) + 0.18;
         o.updateMatrix();
         pools.setMatrixAt(li++, o.matrix);
       } else if (pi < palmsN) {
@@ -670,10 +682,11 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
       const church = (b.groups || []).some(g => g.bit === 10) || /собор|церк|храм|часовн/i.test(name);
       if (church) {
         const R = Math.max(3.2, Math.min(8, b.height * 0.3));
-        domes.push([x, b.height, z, R]);
-        if (/собор/i.test(name)) for (const [dx, dz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) domes.push([x + dx * R * 2.2, b.height, z + dz * R * 2.2, R * 0.55]);
+        const top = b.height + H(x, z);
+        domes.push([x, top, z, R]);
+        if (/собор/i.test(name)) for (const [dx, dz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) domes.push([x + dx * R * 2.2, top, z + dz * R * 2.2, R * 0.55]);
       } else if (b.height >= 15 && Math.hypot(x, z) < 2400 && signs.every(([sx, , sz]) => Math.hypot(sx - x, sz - z) > 220)) {
-        signs.push([x, b.height, z]);
+        signs.push([x, b.height + H(x, z), z]);
       }
     }
     if (domes.length) {
@@ -704,9 +717,11 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
     ];
     cars.count = lights.count = glow.count = N_CARS;
     shirts.count = bodies.count = N_PEOPLE;
-    const roads = new THREE.Mesh(roadGeometry(ways), new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
-    roads.renderOrder = -1;
-    group.add(roads);
+    Promise.resolve(terrainP).then(() => {
+      const roads = new THREE.Mesh(roadGeometry(ways, H), new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+      roads.renderOrder = -1;
+      group.add(roads);
+    });
     console.log(`vice: ${ways.length} улиц, ${N_CARS} машин, ${N_PEOPLE} пешеходов`);
   });
   const SHOUTS = ['Эй! Тут вообще-то тротуар!', 'Права купил, что ли?!', 'Масло своё вези аккуратнее!', 'Я в «Кружево FM» позвоню!', 'Совсем уже, 1147 год на дворе!'];
@@ -716,7 +731,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
     const t = now / 1000, dt = Math.min(0.1, last ? t - last : 0);
     last = t;
     if (!net) return;
-    if (!propsDone && document.getElementById('loading')?.hidden) { propsDone = true; buildGrid(); placeProps(); placeLandmarks(); }
+    if (!propsDone && terrainSettled && document.getElementById('loading')?.hidden) { propsDone = true; buildGrid(); placeProps(); placeLandmarks(); }
     if (game.driving) driveStep(dt, t);
     const boost = drive ? 3 : 1, px = pos.x, pz = pos.y, pspeed = game.driving ? vel.length() : 0;
     for (let k = 0; k < agents.length; k++) {
@@ -725,13 +740,14 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
       const p = advance(net, a, a.stun > 0 ? 0 : a.speed * dt * (a.car ? boost : 1));
       if (a.car) {
         a.x = p.x; a.z = p.z;
-        o.position.set(p.x, 0, p.z);
+        const gy = H(p.x, p.z);
+        o.position.set(p.x, gy, p.z);
         o.rotation.set(0, p.ang, 0);
         o.scale.setScalar(1);
         o.updateMatrix();
         cars.setMatrixAt(k, o.matrix);
         lights.setMatrixAt(k, o.matrix);
-        o.position.y = 0.25;
+        o.position.y = gy + 0.25;
         o.scale.setScalar(drive ? 1.7 : 1);
         o.updateMatrix();
         glow.setMatrixAt(k, o.matrix);
@@ -757,7 +773,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
           a.ex *= Math.exp(-0.4 * dt); a.ez *= Math.exp(-0.4 * dt);
           if (Math.abs(a.ex) + Math.abs(a.ez) < 0.05) a.ex = a.ez = 0;
         }
-        o.position.set(x + (a.ex || 0), y, z + (a.ez || 0));
+        o.position.set(x + (a.ex || 0), y + H(x, z), z + (a.ez || 0));
         o.rotation.set(0, p.ang + (a.jump > 0 ? (1 - a.jump / 0.7) * 6.28 : 0), 0);
         o.scale.setScalar(1);
         o.updateMatrix();
@@ -856,7 +872,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
       pos.set(w.p[2 * i], w.p[2 * i + 1]);
       ang = Math.atan2(-(w.p[2 * j + 1] - w.p[2 * i + 1]), w.p[2 * j] - w.p[2 * i]);
       vel.set(0, 0);
-      camera.position.set(pos.x - Math.cos(ang) * 40, 25, pos.y + Math.sin(ang) * 40);
+      camera.position.set(pos.x - Math.cos(ang) * 40, H(pos.x, pos.y) + 25, pos.y + Math.sin(ang) * 40);
       if (!mission) newMission();
       beam.visible = true;
       startSynth(station);
@@ -906,28 +922,32 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
       if (!hits(pos.x + ux * (8 - d), pos.y + uz * (8 - d), ang)) { pos.x += ux * (8 - d); pos.y += uz * (8 - d); }
       if (vel.length() > 2) a.stun = 1.2;
     }
-    player.position.set(pos.x, 0, pos.y);
-    player.rotation.set(0, ang, 0);
-    pglow.position.set(pos.x, 0.3, pos.y);
+    const gy = H(pos.x, pos.y);
+    player.position.set(pos.x, gy, pos.y);
+    // Наклон по склону: вперёд-назад и вбок.
+    const slope = Math.atan2(H(pos.x + nfx * 5, pos.y + nfz * 5) - H(pos.x - nfx * 5, pos.y - nfz * 5), 10);
+    const roll = Math.atan2(H(pos.x - nfz * 2.5, pos.y + nfx * 2.5) - H(pos.x + nfz * 2.5, pos.y - nfx * 2.5), 5);
+    player.rotation.set(roll, ang, slope, 'YXZ');
+    pglow.position.set(pos.x, gy + 0.3, pos.y);
     pglow.rotation.set(0, ang, 0);
     pglow.material.opacity = 0.6 + Math.min(0.4, Math.abs(vl) / 10);
     // Камера сзади и сверху, догоняет плавно; на скорости отъезжает.
     const back = 34 + Math.abs(vf) * 0.35;
     const k = 1 - Math.exp(-5 * dt);
     camera.position.x += (pos.x - nfx * back - camera.position.x) * k;
-    camera.position.y += (14 + Math.abs(vf) * 0.12 - camera.position.y) * k;
+    camera.position.y += (gy + 14 + Math.abs(vf) * 0.12 - camera.position.y) * k;
     camera.position.z += (pos.y - nfz * back - camera.position.z) * k;
     shake *= Math.exp(-6 * dt);
     camera.position.x += (Math.random() - 0.5) * shake;
     camera.position.y += (Math.random() - 0.5) * shake;
-    camera.lookAt(pos.x + nfx * 14, 2, pos.y + nfz * 14);
+    camera.lookAt(pos.x + nfx * 14, gy + 2, pos.y + nfz * 14);
     controls.target.set(pos.x, 0, pos.y);
 
     // Задание
     beam.visible = mission.stage !== 'wait';
     if (mission.stage === 'wait') return;
     const target = mission.stage === 'pickup' ? mission.pickup : mission.kremlin;
-    beam.position.set(target.x, 210, target.z);
+    beam.position.set(target.x, H(target.x, target.z) + 210, target.z);
     beam.material.color.set(mission.stage === 'pickup' ? NEON.yellow : NEON.pink);
     beam.material.opacity = 0.28 + 0.1 * Math.sin(t * 4);
     const dx = target.x - pos.x, dz = target.z - pos.y, dist = Math.hypot(dx, dz);

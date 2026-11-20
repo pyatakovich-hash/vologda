@@ -2,6 +2,7 @@ import * as THREE from './vendor/three.module.js';
 import { MapControls } from './vendor/MapControls.js';
 import { initBasemap } from './basemap.js';
 import { initVice, tintBasemap } from './vice.js';
+import { loadTerrain, drapeBasemap } from './terrain.js';
 
 // Colours are authored in sRGB and drawn as they are.
 THREE.ColorManagement.enabled = false;
@@ -166,13 +167,17 @@ water.position.y = -0.4;
 flat.add(land, water);
 
 // Подложка CARTO Dark Matter без подписей; пока тайлы грузятся (или если не загрузились), видны земля и вода.
-initBasemap(flat, config).then(g => {
+const basemapP = initBasemap(flat, config).then(g => {
   tintBasemap(g);
   if (g && g.children.length) { land.visible = false; water.visible = false; }
+  return g;
 });
+// Рельеф грузится после объявления uniforms (ниже); vice.js ждёт его через этот промис.
+let resolveTerrain;
+const terrainP = new Promise(r => { resolveTerrain = r; });
 
 // Машины, пешеходы, закатное небо и пасхалка (vice.js).
-const vice = initVice(scene, config, camera, controls, () => meshes, gid => building(gid));
+const vice = initVice(scene, config, camera, controls, () => meshes, gid => building(gid), terrainP);
 
 // ---------- Street and canal names ----------
 // Flat on the ground, turned along the street (pipeline/s07_labels.py). Textures are drawn on first use.
@@ -286,7 +291,16 @@ const uniforms = {
   // Search: one texel per building, lit (255) or not; while uPickOn is 1 the unlit ones dim.
   uPick: { value: null },
   uPickOn: { value: 0 },
+  // Рельеф (terrain.js): сетка высот и её рамка (minX, minZ, шаг, n); n = 0 — рельефа нет.
+  uTerrain: { value: new THREE.DataTexture(new Float32Array(1), 1, 1, THREE.RedFormat, THREE.FloatType) },
+  uTerr: { value: new THREE.Vector4(0, 0, 1, 0) },
 };
+loadTerrain(config).then(t => {
+  uniforms.uTerrain.value = t.texture;
+  uniforms.uTerr.value.copy(t.rect);
+  basemapP.then(g => drapeBasemap(g, t.H, t.exag));
+  resolveTerrain(t);
+}).catch(e => { console.warn('terrain: рельеф не загрузился', e); resolveTerrain(null); });
 const PICK_ROWS = Math.ceil(config.stats.buildings / ATTR_W);
 const pickData = new Uint8Array(ATTR_W * PICK_ROWS);
 const pickTex = new THREE.DataTexture(pickData, ATTR_W, PICK_ROWS, THREE.RedFormat, THREE.UnsignedByteType);
@@ -311,6 +325,18 @@ const VERT = /* glsl */`
   out vec3 vColor;
   out vec3 vWorld;
   out float vKind; // 1 — храм, 2 — деревянный дом, 3 — известное здание (есть статья)
+  out float vGround;
+  uniform sampler2D uTerrain;
+  uniform vec4 uTerr;
+  float terrainAt(vec2 xz) {
+    if (uTerr.w < 1.0) return 0.0;
+    vec2 g = clamp((xz - uTerr.xy) / uTerr.z, vec2(0.0), vec2(uTerr.w - 1.001));
+    ivec2 i = ivec2(floor(g));
+    vec2 f = fract(g);
+    float a = texelFetch(uTerrain, i, 0).r, b = texelFetch(uTerrain, i + ivec2(1, 0), 0).r;
+    float c = texelFetch(uTerrain, i + ivec2(0, 1), 0).r, d = texelFetch(uTerrain, i + ivec2(1, 1), 0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  }
   out float vGid;
 
   vec3 floorsRamp(float f) {
@@ -384,6 +410,8 @@ const VERT = /* glsl */`
     }
     vColor = c;
     vec4 w = modelMatrix * vec4(p, 1.0);
+    vGround = terrainAt(w.xz);
+    w.y += vGround;
     vWorld = w.xyz;
     vKind = hasBit(lay, 10) ? 1.0 : hasBit(lay, 6) ? 2.0 : hasBit(lay, 13) ? 3.0 : 0.0;
     gl_Position = projectionMatrix * viewMatrix * w;
@@ -398,6 +426,7 @@ const FRAG = /* glsl */`
   in vec3 vWorld;
   in float vGid;
   in float vKind;
+  in float vGround;
   out vec4 outColor;
   void main() {
     #ifdef PICK
@@ -405,10 +434,11 @@ const FRAG = /* glsl */`
       outColor = vec4(mod(id, 256.0), mod(floor(id / 256.0), 256.0), floor(id / 65536.0), 255.0) / 255.0;
     #else
       vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+      float hy = vWorld.y - vGround; // высота над землёй
       // Low afternoon sun from the south-west, a soft sky from above.
       float sun = max(dot(n, normalize(vec3(-0.55, 0.55, 0.62))), 0.0);
       float light = n.y > 0.9 ? 1.04 : 0.66 + 0.34 * sun;
-      float foot = mix(0.82, 1.0, clamp(vWorld.y / 12.0, 0.0, 1.0));
+      float foot = mix(0.82, 1.0, clamp(hy / 12.0, 0.0, 1.0));
       vec3 c = vColor * light * foot;
       float d = length(vWorld - cameraPosition);
       // Ночные окна: сетка по стенам, часть горит тёплым светом, редкие — неоном.
@@ -416,7 +446,7 @@ const FRAG = /* glsl */`
       // Известные здания: своя фактура стен и кровли (вблизи; издалека остаётся цвет эпохи).
       if (vKind > 0.5 && wnear > 0.0) {
         vec2 t = normalize(vec2(-n.z, n.x));
-        float u = dot(vWorld.xz, t), y = vWorld.y;
+        float u = dot(vWorld.xz, t), y = hy;
         if (abs(n.y) < 0.3) {
           vec3 base;
           if (vKind < 1.5) {                // храм: белёные стены и лопатки
@@ -449,9 +479,9 @@ const FRAG = /* glsl */`
           vec3 roof = vKind < 1.5 ? vec3(0.22, 0.52, 0.42) : vKind < 2.5 ? vec3(0.36, 0.31, 0.3) : vec3(0.32, 0.48, 0.42);
           c = mix(c, mix(mix(roof, roof * 1.45, seam), vColor, 0.18), wnear);
         }
-      } else if (abs(n.y) < 0.3 && vWorld.y > 1.2 && wnear > 0.0) {
+      } else if (abs(n.y) < 0.3 && hy > 1.2 && wnear > 0.0) {
         vec2 t = normalize(vec2(-n.z, n.x));
-        float u = dot(vWorld.xz, t) / 3.4, v = vWorld.y / 3.1;
+        float u = dot(vWorld.xz, t) / 3.4, v = hy / 3.1;
         float fu = fract(u), fv = fract(v);
         float win = step(0.26, fu) * step(fu, 0.74) * step(0.32, fv) * step(fv, 0.8);
         float h = fract(sin(dot(floor(vec2(u, v)) + vGid * 0.731, vec2(127.1, 311.7))) * 43758.5453);

@@ -43,21 +43,25 @@ async function loadTileTexture(loader, z, x, y) {
   });
 }
 
-function makeTileMesh(b, texture, origin) {
-  const x0 = toLocal(b.minx, b.miny, origin);
-  const x1 = toLocal(b.maxx, b.miny, origin);
-  const x2 = toLocal(b.maxx, b.maxy, origin);
-  const x3 = toLocal(b.minx, b.maxy, origin);
+// Плитка — сетка 16×16, чтобы потом лечь на рельеф (terrain.js → drapeBasemap).
+function makeTileMesh(b, texture, origin, S = 16) {
+  const c0 = toLocal(b.minx, b.miny, origin), c1 = toLocal(b.maxx, b.miny, origin);
+  const c2 = toLocal(b.maxx, b.maxy, origin), c3 = toLocal(b.minx, b.maxy, origin);
+  const pos = [], uv = [], idx = [];
+  for (let j = 0; j <= S; j++) for (let i = 0; i <= S; i++) {
+    const u = i / S, v = j / S;
+    const w0 = (1 - u) * (1 - v), w1 = u * (1 - v), w2 = u * v, w3 = (1 - u) * v;
+    pos.push(c0[0] * w0 + c1[0] * w1 + c2[0] * w2 + c3[0] * w3, -0.1, c0[1] * w0 + c1[1] * w1 + c2[1] * w2 + c3[1] * w3);
+    uv.push(u, v);
+  }
+  for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
+    const a = j * (S + 1) + i, b2 = a + 1, c = a + S + 2, d = a + S + 1;
+    idx.push(a, b2, c, a, c, d);
+  }
   const geom = new THREE.BufferGeometry();
-  const y = -0.1;
-  const pos = new Float32Array([
-    x0[0], y, x0[1], x1[0], y, x1[1], x2[0], y, x2[1],
-    x0[0], y, x0[1], x2[0], y, x2[1], x3[0], y, x3[1],
-  ]);
-  const uv = new Float32Array([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1]);
-  geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geom.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-  geom.computeVertexNormals();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geom.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geom.setIndex(idx);
   texture.colorSpace = THREE.SRGBColorSpace;
   const mat = new THREE.MeshBasicMaterial({ map: texture, depthWrite: false, toneMapped: false });
   return new THREE.Mesh(geom, mat);
