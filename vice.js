@@ -793,6 +793,139 @@ function riverBanks(rivers) {
   });
 }
 
+// ---------- Мосты ----------
+// Участки дорог над водой (+12 м на берега) — это пролёты мостов.
+function findBridges(ways) {
+  const out = [];
+  for (const w of ways) {
+    if (w.f) continue;
+    const pts = densify(w.p, 4);
+    let s0 = -1, s1 = -1;
+    const flush = () => {
+      if (s0 < 0) return;
+      // Мост — только если дорога пересекает воду поперёк: в середине участка вода и слева, и справа от неё,
+      // а участок начинается и кончается на суше. Дорога вдоль набережной мостом не считается.
+      const m = 2 * Math.floor((s0 + s1) / 4), j = Math.min(pts.length - 2, m + 2), i0 = Math.max(0, j - 2);
+      const dx = pts[j] - pts[i0], dz = pts[j + 1] - pts[i0 + 1], L = Math.hypot(dx, dz) || 1, nx = -dz / L, nz = dx / L;
+      const across = [12, 24].every(d => isWater(pts[m] + nx * d, pts[m + 1] + nz * d) && isWater(pts[m] - nx * d, pts[m + 1] - nz * d));
+      const ends = s0 > 0 && s1 < pts.length - 2, len = (s1 - s0) / 2 * 4;
+      if (across && ends && len >= 8 && len < 400) {
+        const a = Math.max(0, s0 - 6), b = Math.min(pts.length - 2, s1 + 6);
+        out.push({ p: pts.slice(a, b + 2), w: w.k === 2 ? 15 : 8.5 });
+      }
+      s0 = s1 = -1;
+    };
+    for (let i = 0; i < pts.length; i += 2) {
+      if (isWater(pts[i], pts[i + 1])) { if (s0 < 0) s0 = i; s1 = i; } else flush();
+    }
+    flush();
+  }
+  return out;
+}
+// Профиль полотна: от берега до берега с подъёмом к середине и запасом над водой; поиск — по хэшу 20 м.
+function bridgeSurface(bridges, Ht) {
+  const cells = new Map();
+  for (const B of bridges) {
+    const n = B.p.length / 2, s = [0];
+    for (let i = 1; i < n; i++) s.push(s[i - 1] + Math.hypot(B.p[2 * i] - B.p[2 * i - 2], B.p[2 * i + 1] - B.p[2 * i - 1]));
+    const L = s[n - 1] || 1, hA = Ht(B.p[0], B.p[1]), hB = Ht(B.p[2 * n - 2], B.p[2 * n - 1]), rise = Math.min(6, 1.5 + L * 0.03);
+    B.s = s; B.L = L;
+    B.y = s.map((si, i) => Math.max(hA + (hB - hA) * si / L + rise * Math.sin(Math.PI * si / L), Ht(B.p[2 * i], B.p[2 * i + 1]) + (si > 8 && si < L - 8 ? 4 : 0)));
+    const r = B.w / 2 + 2;
+    for (let i = 0; i < n - 1; i++) {
+      const x0 = Math.min(B.p[2 * i], B.p[2 * i + 2]) - r, x1 = Math.max(B.p[2 * i], B.p[2 * i + 2]) + r;
+      const z0 = Math.min(B.p[2 * i + 1], B.p[2 * i + 3]) - r, z1 = Math.max(B.p[2 * i + 1], B.p[2 * i + 3]) + r;
+      for (let cx = Math.floor(x0 / 20); cx <= Math.floor(x1 / 20); cx++) for (let cz = Math.floor(z0 / 20); cz <= Math.floor(z1 / 20); cz++) {
+        const k = cx + ',' + cz;
+        if (!cells.has(k)) cells.set(k, []);
+        cells.get(k).push([B, i]);
+      }
+    }
+  }
+  return (x, z) => {
+    const list = cells.get(Math.floor(x / 20) + ',' + Math.floor(z / 20));
+    let best = -Infinity;
+    if (list) for (const [B, i] of list) {
+      const ax = B.p[2 * i], az = B.p[2 * i + 1], bx = B.p[2 * i + 2], bz = B.p[2 * i + 3];
+      const dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz || 1;
+      const f = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / L2));
+      if (Math.hypot(ax + dx * f - x, az + dz * f - z) > B.w / 2 + 2) continue;
+      best = Math.max(best, B.y[i] + (B.y[i + 1] - B.y[i]) * f);
+    }
+    return best > -Infinity ? best : Ht(x, z);
+  };
+}
+// Мост: фасады полотна, низ, гранитные парапеты с неоновой кромкой, фонари, опоры в воде и каменные арки между ними.
+function bridgeGeometry(bridges, Ht) {
+  const pos = [], col = [], idx = [];
+  const quad = (a, b, c2, d, rgb) => {
+    const i = pos.length / 3;
+    pos.push(...a, ...b, ...c2, ...d);
+    for (let k = 0; k < 4; k++) col.push(...rgb);
+    idx.push(i, i + 1, i + 2, i, i + 2, i + 3);
+  };
+  const box = (cx, y0, cz, hx, hy, hz, ang, rgb) => {
+    const ca = Math.cos(ang), sa = Math.sin(ang), P = (x, y, z) => [cx + x * ca - z * sa, y, cz + x * sa + z * ca];
+    const c = [[-hx, -hz], [hx, -hz], [hx, hz], [-hx, hz]];
+    for (let k = 0; k < 4; k++) {
+      const [x0, z0] = c[k], [x1, z1] = c[(k + 1) % 4], sh = 0.75 + 0.25 * ((k % 2) ? 1 : 0.6);
+      quad(P(x0, y0, z0), P(x1, y0, z1), P(x1, y0 + hy, z1), P(x0, y0 + hy, z0), rgb.map(v => v * sh));
+    }
+    quad(P(-hx, y0 + hy, -hz), P(hx, y0 + hy, -hz), P(hx, y0 + hy, hz), P(-hx, y0 + hy, hz), rgb.map(v => v * 1.15));
+  };
+  const STEEL = [0.26, 0.2, 0.38], UNDER = [0.16, 0.12, 0.24], GRANITE = [0.52, 0.47, 0.62], ARCH = [0.44, 0.4, 0.55];
+  for (const B of bridges) {
+    const n = B.p.length / 2, half = B.w / 2 + 1, neon = B.w > 10 ? [0.15, 0.95, 1.1] : [1.1, 0.2, 0.6];
+    const L = offsetLine(B.p, half), R = offsetLine(B.p, -half);
+    for (let i = 0; i < n - 1; i++) {
+      const y0 = B.y[i], y1 = B.y[i + 1];
+      for (const [S, sgn] of [[L, 1], [R, -1]]) {
+        const a = [S[2 * i], y0, S[2 * i + 1]], b = [S[2 * i + 2], y1, S[2 * i + 3]];
+        quad([a[0], y0 - 1.4, a[2]], [b[0], y1 - 1.4, b[2]], [b[0], y1 + 0.05, b[2]], [a[0], y0 + 0.05, a[2]], STEEL);      // фасад полотна
+        quad([a[0], y0 + 0.05, a[2]], [b[0], y1 + 0.05, b[2]], [b[0], y1 + 1.1, b[2]], [a[0], y0 + 1.1, a[2]], GRANITE);   // парапет
+        quad([a[0], y0 + 1.1, a[2]], [b[0], y1 + 1.1, b[2]], [b[0], y1 + 1.22, b[2]], [a[0], y0 + 1.22, a[2]], neon);     // неоновая кромка
+        quad([a[0], y0 - 1.42, a[2]], [b[0], y1 - 1.42, b[2]], [b[0], y1 - 1.3, b[2]], [a[0], y0 - 1.3, a[2]], neon.map(v => v * 0.6)); // подсветка снизу
+      }
+      quad([L[2 * i], y0 - 1.4, L[2 * i + 1]], [R[2 * i], y0 - 1.4, R[2 * i + 1]], [R[2 * i + 2], y1 - 1.4, R[2 * i + 3]], [L[2 * i + 2], y1 - 1.4, L[2 * i + 3]], UNDER);
+    }
+    // Опоры каждые ~32 м над водой и арки между ними (по обеим сторонам — стенка от низа полотна до свода).
+    const piers = [0];
+    for (let s = 32; s < B.L - 16; s += 32) piers.push(s);
+    piers.push(B.L);
+    const at = s => { let i = 0; while (i < n - 2 && B.s[i + 1] < s) i++; const f = (s - B.s[i]) / ((B.s[i + 1] - B.s[i]) || 1); return { i, f, x: B.p[2 * i] + (B.p[2 * i + 2] - B.p[2 * i]) * f, z: B.p[2 * i + 1] + (B.p[2 * i + 3] - B.p[2 * i + 1]) * f, y: B.y[i] + (B.y[i + 1] - B.y[i]) * f, ang: Math.atan2(B.p[2 * i + 3] - B.p[2 * i + 1], B.p[2 * i + 2] - B.p[2 * i]) }; };
+    const water = s => { const q = at(s); return Ht(q.x, q.z) - 1.2; };
+    for (const s of piers.slice(1, -1)) {
+      const q = at(s);
+      box(q.x, water(s) - 4, q.z, 1.4, q.y - 1.4 - (water(s) - 4), half - 0.6, q.ang, GRANITE);
+    }
+    for (let k = 0; k < piers.length - 1; k++) {
+      const sA = piers[k], sB = piers[k + 1], steps = 10;
+      for (let j = 0; j < steps; j++) {
+        const u0 = j / steps, u1 = (j + 1) / steps, s0 = sA + (sB - sA) * u0, s1 = sA + (sB - sA) * u1;
+        const q0 = at(s0), q1 = at(s1), w0 = water(s0), w1 = water(s1);
+        const arch = (u, q, w) => w + 0.5 + (q.y - 2.2 - w - 0.5) * Math.pow(Math.sin(Math.PI * u), 0.55);
+        const a0 = arch(u0, q0, w0), a1 = arch(u1, q1, w1);
+        for (const side of [half - 0.05, -(half - 0.05)]) {
+          const p0 = [q0.x - Math.sin(q0.ang) * side, q0.z + Math.cos(q0.ang) * side], p1 = [q1.x - Math.sin(q1.ang) * side, q1.z + Math.cos(q1.ang) * side];
+          quad([p0[0], a0, p0[1]], [p1[0], a1, p1[1]], [p1[0], q1.y - 1.4, p1[1]], [p0[0], q0.y - 1.4, p0[1]], ARCH);      // надсводная стенка
+          quad([p0[0], a0 - 0.35, p0[1]], [p1[0], a1 - 0.35, p1[1]], [p1[0], a1, p1[1]], [p0[0], a0, p0[1]], neon.map(v => v * 0.8)); // светящийся свод
+        }
+      }
+    }
+    // Фонари на парапетах через ~22 м.
+    for (let s = 6; s < B.L - 4; s += 22) for (const side of [half - 0.2, -(half - 0.2)]) {
+      const q = at(s), x = q.x - Math.sin(q.ang) * side, z = q.z + Math.cos(q.ang) * side;
+      box(x, q.y + 1.1, z, 0.12, 4.2, 0.12, q.ang, [0.4, 0.36, 0.5]);
+      box(x, q.y + 5.2, z, 0.35, 0.45, 0.35, q.ang, [1.4, 1.2, 0.9]);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setIndex(idx);
+  return g;
+}
+
 // Рябь с неоновыми бликами по воде.
 function waterShader(sh) {
   sh.vertexShader = 'varying vec3 vP;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vP = position;');
@@ -988,8 +1121,9 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
     await document.fonts?.load('150px Lobster').catch(() => {});
     signs.slice(0, SIGNS.length).forEach(([x, y, z], i) => {
       const color = [NEON.pink, NEON.cyan, NEON.yellow, NEON.orange, NEON.purple][i % 5];
-      const m = new THREE.Mesh(new THREE.PlaneGeometry(28, 7), new THREE.MeshBasicMaterial({
-        map: signTexture(SIGNS[i], color), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+      const mat = new THREE.MeshBasicMaterial({ map: signTexture(SIGNS[i], color), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+      const m = new THREE.Group();
+      m.add(new THREE.Mesh(new THREE.PlaneGeometry(28, 7), mat), new THREE.Mesh(new THREE.PlaneGeometry(28, 7).rotateY(Math.PI), mat));
       m.position.set(x, y + 4.5, z);
       m.rotation.y = Math.atan2(-x, -z); // лицом к центру города
       group.add(m);
@@ -1015,20 +1149,26 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
     shopData = data.shops || [];
     Promise.resolve(terrainP).then(() => {
       // Порядок: подложка (−3) → вода (−2) → дороги (−1): подложка не пишет глубину, поэтому не перекрывает их на склонах.
-      const roads = new THREE.Mesh(roadGeometry(ways, H), new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
-      roads.renderOrder = -1;
-      group.add(roads);
-      const rivers = data.rivers || [];
+      const Ht = H, rivers = data.rivers || [];
       // Хэш точек дорог (клетка 12 м), чтобы прервать набережную на мостах.
       const roadCells = new Set();
       for (const w of ways) if (!w.f) { const d = densify(w.p, 6); for (let i = 0; i < d.length; i += 2) roadCells.add(`${Math.floor(d[i] / 12)},${Math.floor(d[i + 1] / 12)}`); }
       const nearRoad = (x, z) => roadCells.has(`${Math.floor(x / 12)},${Math.floor(z / 12)}`);
-      const wg = mergeGeoms([waterGeometry(data.water || [], H), riverWaterGeometry(rivers, H)]);
+      const emb = embankmentGeometry([...(data.water || []), ...riverBanks(rivers)], Ht, rivers, nearRoad); // заодно строит маску воды
+      // Мосты: где дорога идёт над водой, полотно поднимается аркой; дальше всё ездит и ставится по высоте с мостами.
+      const bridges = findBridges(ways);
+      const Hs = bridgeSurface(bridges, Ht);
+      H = Hs;
+      const roads = new THREE.Mesh(roadGeometry(ways, Hs), new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+      roads.renderOrder = -1;
+      group.add(roads);
+      const wg = mergeGeoms([waterGeometry(data.water || [], Ht), riverWaterGeometry(rivers, Ht)]);
       waterMat = new THREE.MeshBasicMaterial({ color: '#1b3f9a', side: THREE.DoubleSide, depthWrite: false });
       waterMat.onBeforeCompile = sh => { sh.uniforms.uT = { value: 0 }; waterMat.userData.shader = sh; waterShader(sh); };
       const waterMesh = new THREE.Mesh(wg, waterMat);
       waterMesh.renderOrder = -2;
-      group.add(waterMesh, new THREE.Mesh(embankmentGeometry([...(data.water || []), ...riverBanks(rivers)], H, rivers, nearRoad), basic()));
+      group.add(waterMesh, new THREE.Mesh(emb, basic()), new THREE.Mesh(bridgeGeometry(bridges, Ht), basic()));
+      console.log(`vice: ${bridges.length} мостов`);
       console.log(`vice: ${(data.water || []).length} водоёмов, ${rivers.length} русел, ${shopData.length} магазинов`);
     });
     console.log(`vice: ${ways.length} улиц, ${N_CARS} машин, ${N_PEOPLE} пешеходов`);
@@ -1045,7 +1185,9 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
       const color = [NEON.pink, NEON.cyan, NEON.yellow, NEON.orange, '#7dffb2'][i % 5];
       const key = sh.name + color;
       if (!texCache.has(key)) texCache.set(key, shopTexture(sh.name, color));
-      const m = new THREE.Mesh(new THREE.PlaneGeometry(16, 4), new THREE.MeshBasicMaterial({ map: texCache.get(key), transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+      // Две стороны вывески — каждая со своим незеркальным текстом.
+      const m = new THREE.Group(), mat = new THREE.MeshBasicMaterial({ map: texCache.get(key), transparent: true, depthWrite: false });
+      m.add(new THREE.Mesh(new THREE.PlaneGeometry(16, 4), mat), new THREE.Mesh(new THREE.PlaneGeometry(16, 4).rotateY(Math.PI), mat));
       // Вывеска чуть ближе к дороге, лицом к ней, на высоте второго этажа.
       const d = Math.hypot(rx, rz) || 1, px = sh.x + rx / d * Math.min(6, d * 0.4), pz = sh.z + rz / d * Math.min(6, d * 0.4);
       m.position.set(px, H(px, pz) + 6.5, pz);

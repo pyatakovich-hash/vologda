@@ -221,7 +221,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     const k = bMesh[b.kind];
     const grow = Math.min(1, (performance.now() - b.born) / 1800);
     o.position.set(b.x, b.y, b.z); o.rotation.set(0, b.rot, 0);
-    o.scale.set(b.w, Math.max(0.3, b.h * grow), b.d); o.updateMatrix();
+    o.scale.set(b.w, Math.max(0.3, (b.h + 2) * grow), b.d); o.updateMatrix();
     k.mesh.setMatrixAt(b.inst, o.matrix);
     k.mesh.instanceMatrix.needsUpdate = true;
     return grow < 1;
@@ -236,7 +236,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
   function addBuilding(spec) {
     const k = bMesh[spec.kind];
     if (k.list.length >= MAXB) return null;
-    const b = { ...spec, y: H(spec.x, spec.z), inst: k.list.length, born: performance.now() };
+    const b = { ...spec, y: H(spec.x, spec.z) - 2, inst: k.list.length, born: performance.now() }; // на 2 м в землю — не висит на склоне
     k.list.push(b);
     k.mesh.count = k.list.length;
     k.mesh.setColorAt(b.inst, col.set(b.color));
@@ -247,7 +247,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     if (b.kind === 3 && b.chimney) {
       b.ch = chimneys.length;
       chimneys.push(b);
-      o.position.set(b.x + (b.rot ? b.d : b.w) * 0.3, b.y + b.h, b.z + (b.rot ? b.w : b.d) * 0.25); o.rotation.set(0, 0, 0); o.scale.setScalar(1); o.updateMatrix();
+      o.position.set(b.x + (b.rot ? b.d : b.w) * 0.3, b.y + b.h + 2, b.z + (b.rot ? b.w : b.d) * 0.25); o.rotation.set(0, 0, 0); o.scale.setScalar(1); o.updateMatrix();
       chimneyMesh.setMatrixAt(b.ch, o.matrix); chimneyMesh.count = chimneys.length; chimneyMesh.instanceMatrix.needsUpdate = true;
     }
     if (b.kind === 1) S.addRes += b.res || 0;
@@ -346,6 +346,67 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     centroids = new Float32Array(n * 2);
     for (let g = 0; g < n; g++) { const c = acc[g * 3 + 2] || 1; centroids[g * 2] = acc[g * 3] / c; centroids[g * 2 + 1] = acc[g * 3 + 1] / c; }
   }
+  // ---------- Двускатные крыши малоэтажных домов по реальному контуру ----------
+  // Для каждого дома: главная ось контура (по ковариации вершин), габариты вдоль неё; крыша-«домик» над простыми
+  // (почти прямоугольными) домами до 3 этажей: частный сектор и старый город. Конёк — вдоль длинной стороны.
+  let roofs = null;
+  const roofIdx = new Int32Array(config.stats.buildings).fill(-1);
+  function buildRoofs() {
+    const n = config.stats.buildings, st = new Float64Array(n * 6), top = new Float32Array(n);
+    const each = fn => {
+      for (const m of getMeshes()) {
+        const p = m.geometry.attributes.position.array, b = m.geometry.attributes.bld.array;
+        const data = (m.userData.draw || m.material).uniforms.uAttr.value.image.data, sc = m.scale.x, ox = m.position.x, oz = m.position.z;
+        for (let v = 0; v < b.length; v++) fn(data[b[v] * 8 + 3], p[v * 3] * sc + ox, p[v * 3 + 1] * sc, p[v * 3 + 2] * sc + oz);
+      }
+    };
+    each((g, x, y, z) => { const k = g * 6; st[k] += x; st[k + 1] += z; st[k + 2] += x * x; st[k + 3] += z * z; st[k + 4] += x * z; st[k + 5]++; top[g] = Math.max(top[g], y); });
+    const ang = new Float32Array(n), cx = new Float32Array(n), cz = new Float32Array(n);
+    const mn = new Float32Array(n * 2).fill(1e9), mx = new Float32Array(n * 2).fill(-1e9);
+    for (let g = 0; g < n; g++) {
+      const k = g * 6, c = st[k + 5] || 1, ax = st[k] / c, az = st[k + 1] / c;
+      const vxx = st[k + 2] / c - ax * ax, vzz = st[k + 3] / c - az * az, vxz = st[k + 4] / c - ax * az;
+      ang[g] = 0.5 * Math.atan2(2 * vxz, vxx - vzz); cx[g] = ax; cz[g] = az;
+    }
+    each((g, x, y, z) => {
+      const ca = Math.cos(ang[g]), sa = Math.sin(ang[g]), u = (x - cx[g]) * ca + (z - cz[g]) * sa, v = -(x - cx[g]) * sa + (z - cz[g]) * ca;
+      mn[g * 2] = Math.min(mn[g * 2], u); mx[g * 2] = Math.max(mx[g * 2], u); mn[g * 2 + 1] = Math.min(mn[g * 2 + 1], v); mx[g * 2 + 1] = Math.max(mx[g * 2 + 1], v);
+    });
+    const list = [];
+    for (let g = 0; g < n; g++) {
+      const cnt = st[g * 6 + 5], h = top[g];
+      if (!cnt || cnt > 28 || h < 2.5 || h > 11) continue;
+      const bd = building(g);
+      if (bd.groups.some(x => x.bit === 10)) continue; // у храмов купола
+      let L = mx[g * 2] - mn[g * 2], W = mx[g * 2 + 1] - mn[g * 2 + 1], a = ang[g];
+      if (L < 4 || W < 4 || L > 70 || W > 30) continue;
+      if (W > L) { [L, W] = [W, L]; a += Math.PI / 2; }
+      const ca = Math.cos(ang[g]), sa = Math.sin(ang[g]), mu = (mn[g * 2] + mx[g * 2]) / 2, mv = (mn[g * 2 + 1] + mx[g * 2 + 1]) / 2;
+      const x = cx[g] + mu * ca - mv * sa, z = cz[g] + mu * sa + mv * ca;
+      list.push({ g, x, z, L, W, a, y: H(x, z) + h, rise: Math.min(5.5, 0.42 * W) });
+    }
+    // Единичная крыша: конёк вдоль X на высоте 1, скаты на ±0.5 по Z, фронтоны на торцах; свесы 6–8 %.
+    const tri = (a, b, c, k) => [...a, ...b, ...c].concat([]), P = [], C = [];
+    const face = (pts, k) => { for (const q of pts) P.push(...q); for (let i = 0; i < pts.length; i++) C.push(k, k, k); };
+    face([[-0.53, 0, 0.54], [0.53, 0, 0.54], [0.53, 1, 0], [-0.53, 0, 0.54], [0.53, 1, 0], [-0.53, 1, 0]], 1.0);    // южный скат
+    face([[0.53, 0, -0.54], [-0.53, 0, -0.54], [-0.53, 1, 0], [0.53, 0, -0.54], [-0.53, 1, 0], [0.53, 1, 0]], 0.72); // северный скат
+    face([[0.5, 0, 0.5], [0.5, 0, -0.5], [0.5, 1, 0]], 0.62);                                                         // фронтоны
+    face([[-0.5, 0, -0.5], [-0.5, 0, 0.5], [-0.5, 1, 0]], 0.62);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(C, 3));
+    roofs = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }), Math.max(1, list.length));
+    const PAL = ['#6c7a8c', '#8a3a30', '#2f6b55', '#4a4658', '#7a6a8f', '#9a5a3a'];
+    list.forEach((r, i) => {
+      o.position.set(r.x, r.y, r.z); o.rotation.set(0, -r.a, 0); o.scale.set(r.L, r.rise, r.W); o.updateMatrix();
+      roofs.setMatrixAt(i, o.matrix);
+      roofs.setColorAt(i, col.set(PAL[(r.g * 7) % PAL.length]));
+      roofIdx[r.g] = i;
+    });
+    roofs.frustumCulled = false;
+    group.add(roofs);
+    console.log(`sim: двускатные крыши на ${list.length} домах`);
+  }
   function demolishOriginal(gid) {
     const data = uniforms.uBld.value.image.data;
     if (data[gid * 4] === 255) return false;
@@ -366,6 +427,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     if (x0 < x1 && G.cells) vice.setCells(x0, z0, x1, z1, 0);
     const cx = centroids ? centroids[gid * 2] : (x0 + x1) / 2, cz = centroids ? centroids[gid * 2 + 1] : (z0 + z1) / 2;
     vice.hideLandmarksNear(cx, cz, Math.max(12, Math.hypot(x1 - x0, z1 - z0) / 2 + 6));
+    if (roofs && roofIdx[gid] >= 0) { o.position.set(0, -1e4, 0); o.scale.setScalar(0); o.updateMatrix(); roofs.setMatrixAt(roofIdx[gid], o.matrix); roofs.instanceMatrix.needsUpdate = true; }
     const bd = building(gid), floors = Math.max(1, Math.round(bd.height / 3));
     if (bd.groups.some(g => g.bit === 11)) S.lostRes += floors * 18; else S.lostJobs += floors * 6;
     return true;
@@ -426,8 +488,9 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
       const img = new Image();
       img.crossOrigin = 'anonymous';
       img.onload = () => {
-        const s = Math.min(img.width, img.height * 1.4), sx = (img.width - s) / 2, sh = s / 1.4, sy = Math.max(0, (img.height - sh) * 0.45);
-        ctx.drawImage(img, sx, sy, s, sh, (slot % N) * CELL, Math.floor(slot / N) * CELL, CELL, CELL);
+        // Берём середину кадра — обычно это сам фасад: без неба сверху, мостовой снизу и соседей по краям.
+        const sw = img.width * 0.5, sh = Math.min(img.height * 0.5, sw / 1.4), sx = img.width * 0.25, sy = img.height * 0.22;
+        ctx.drawImage(img, sx, sy, sw, sh, (slot % N) * CELL, Math.floor(slot / N) * CELL, CELL, CELL);
         data[p.gid * 4 + 1] = slot + 1;
         ok++;
         done();
@@ -694,6 +757,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
       ready = true;
       markRoads(vice.getNet().ways);
       computeCentroids();
+      buildRoofs();
       loadPhotos().catch(err => console.warn('sim: фото с Викисклада не загрузились', err));
     }
     for (const b of growing) if (!setInstance(b)) growing.delete(b);

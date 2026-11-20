@@ -304,6 +304,7 @@ loadTerrain(config).then(t => {
   uniforms.uTerrain.value = t.texture;
   uniforms.uTerr.value.copy(t.rect);
   basemapP.then(g => drapeBasemap(g, t.H, t.exag));
+  flat.add(t.occluder);
   resolveTerrain(t);
 }).catch(e => { console.warn('terrain: рельеф не загрузился', e); resolveTerrain(null); });
 // Режим стройки (sim.js): зоны, рост, дороги, снос, бюджет, фото фасадов.
@@ -335,6 +336,7 @@ const VERT = /* glsl */`
   out float vGround;
   out float vSlot;
   out float vFloorsH;
+  out float vEra; // −1 — год неизвестен, иначе номер эпохи
   uniform sampler2D uBld;
   uniform sampler2D uTerrain;
   uniform vec4 uTerr;
@@ -424,9 +426,11 @@ const VERT = /* glsl */`
       if (texelFetch(uPick, ivec2(gi % ${ATTR_W}, gi / ${ATTR_W}), 0).r < 0.5) c = mix(c, uMaquette, 0.78);
     }
     vColor = c;
+    vEra = unknown ? -1.0 : float(period);
     vec4 w = modelMatrix * vec4(p, 1.0);
     vGround = terrainAt(w.xz);
     w.y += vGround;
+    if (position.y < 1.0) w.y -= 1.6; // цоколь уходит в землю: на склонах дом не повисает над подложкой
     vWorld = w.xyz;
     vKind = hasBit(lay, 10) ? 1.0 : hasBit(lay, 6) ? 2.0 : hasBit(lay, 13) ? 3.0 : 0.0;
     gl_Position = projectionMatrix * viewMatrix * w;
@@ -444,6 +448,7 @@ const FRAG = /* glsl */`
   in float vGround;
   in float vSlot;
   in float vFloorsH;
+  in float vEra;
   uniform sampler2D uAtlas;
   uniform float uAtlasN;
   out vec4 outColor;
@@ -466,7 +471,7 @@ const FRAG = /* glsl */`
       if (vSlot > 0.5 && abs(n.y) < 0.3 && wnear > 0.0) {
         vec2 t = normalize(vec2(-n.z, n.x));
         float H0 = max(vFloorsH, 6.0);
-        float pu = fract(dot(vWorld.xz, t) / (H0 * 1.4)), pv = fract(hy / H0); // выше — фото повторяется, без растянутых полос
+        float pu = fract(dot(vWorld.xz, t) / 8.4), pv = fract(max(hy, 0.0) / 6.0); // кусок фасада с фото как материал стены: ~2 этажа на повтор
         float s = vSlot - 1.0, cx = mod(s, uAtlasN), cy = floor(s / uAtlasN);
         vec2 uv = vec2((cx + 0.02 + pu * 0.96) / uAtlasN, 1.0 - (cy + 1.0 - (0.02 + pv * 0.96)) / uAtlasN);
         vec3 ph = texture(uAtlas, uv).rgb;
@@ -506,15 +511,53 @@ const FRAG = /* glsl */`
           vec3 roof = vKind < 1.5 ? vec3(0.22, 0.52, 0.42) : vKind < 2.5 ? vec3(0.36, 0.31, 0.3) : vec3(0.32, 0.48, 0.42);
           c = mix(c, mix(mix(roof, roof * 1.45, seam), vColor, 0.18), wnear);
         }
-      } else if (abs(n.y) < 0.3 && hy > 1.2 && wnear > 0.0) {
+      } else if (abs(n.y) < 0.3 && wnear > 0.0) {
+        // Фасады с объёмом по типу дома: старый город — штукатурка, карнизы, наличники; советские 5+ этажей — панели
+        // со швами и балконами; советские ниже — кирпич; новые — стеклянные ленты. Объём — светотенью: откосы, подоконники, тяги.
         vec2 t = normalize(vec2(-n.z, n.x));
-        float u = dot(vWorld.xz, t) / 3.4, v = hy / 3.1;
-        float fu = fract(u), fv = fract(v);
-        float win = step(0.26, fu) * step(fu, 0.74) * step(0.32, fv) * step(fv, 0.8);
-        float h = fract(sin(dot(floor(vec2(u, v)) + vGid * 0.731, vec2(127.1, 311.7))) * 43758.5453);
+        float u = dot(vWorld.xz, t), y = max(hy, 0.0);
+        float fl = vFloorsH / 3.0;
+        int style = vEra < -0.5 ? (fl >= 5.0 ? 1 : 3) : vEra < 0.5 ? 3 : vEra < 1.5 ? (fl >= 5.0 ? 1 : 2) : 0;
+        float bay = style == 0 ? 1.6 : style == 3 ? 3.4 : 3.0, fh = style == 3 ? 3.6 : 2.85;
+        float fu = fract(u / bay), fv = fract(y / fh);
+        vec2 cell = floor(vec2(u / bay, y / fh));
+        float h = fract(sin(dot(cell + vGid * 0.731, vec2(127.1, 311.7))) * 43758.5453);
+        vec3 wall = c, mat;
+        float wx0, wx1, wy0, wy1;
+        if (style == 1) {        // панель
+          mat = mix(vec3(0.78, 0.76, 0.8), wall, 0.45);
+          wx0 = 0.22; wx1 = 0.78; wy0 = 0.34; wy1 = 0.82;
+          mat *= 1.0 - 0.35 * (step(fu, 0.015) + step(0.985, fu) + step(fv, 0.02));                 // швы панелей
+          float balc = step(0.5, fract(cell.x * 0.5 + cell.y * 0.0)) * step(0.06, fu) * step(fu, 0.94) * step(fv, 0.3) * step(1.0, cell.y);
+          mat = mix(mat, mix(vec3(0.35, 0.3, 0.45), wall, 0.3) * (fv > 0.27 ? 1.35 : 0.85), balc); // балкон: плита и светлый край
+        } else if (style == 2) { // кирпич
+          float row = floor(y / 0.3), bu = fract(u / 0.62 + 0.5 * mod(row, 2.0));
+          float mortar = max(step(0.86, fract(y / 0.3)), step(0.93, bu));
+          mat = mix(mix(vec3(0.62, 0.3, 0.24), wall, 0.4), vec3(0.8, 0.76, 0.72), mortar * 0.6);
+          wx0 = 0.25; wx1 = 0.75; wy0 = 0.32; wy1 = 0.8;
+        } else if (style == 3) { // штукатурка старого города: руст на первом этаже, тяги, наличники
+          mat = mix(vec3(0.9, 0.84, 0.74), wall, 0.5);
+          mat *= y < fh ? 0.88 + 0.12 * step(0.1, fract(y / 0.45)) : 1.0;                         // руст
+          mat = mix(mat, mat * 1.18, step(0.94, fv)) * (1.0 - 0.25 * step(0.9, fv) * step(fv, 0.94)); // междуэтажная тяга
+          wx0 = 0.3; wx1 = 0.7; wy0 = 0.28; wy1 = 0.82;
+        } else {                 // новое: стеклянные ленты и импосты
+          mat = mix(vec3(0.6, 0.62, 0.72), wall, 0.5);
+          wx0 = 0.0; wx1 = 1.0; wy0 = 0.3; wy1 = 0.88;
+        }
+        float win = step(wx0, fu) * step(fu, wx1) * step(wy0, fv) * step(fv, wy1) * step(0.9, y);
         vec3 lit = h > 0.94 ? vec3(1.0, 0.3, 0.7) : h > 0.88 ? vec3(0.35, 0.95, 1.0) : vec3(1.0, 0.8, 0.5);
-        vec3 glass = mix(vec3(0.07, 0.04, 0.13), lit, step(0.5, h));
-        c = mix(c, mix(c * 0.72, glass, win), wnear);
+        vec3 glass = mix(vec3(0.07, 0.05, 0.14), lit, step(0.5, h));
+        if (style == 0) glass = mix(vec3(0.12, 0.1, 0.25) + vec3(0.5, 0.15, 0.45) * fv, glass, 0.35) * (1.0 - 0.5 * step(0.94, fract(u / 1.5)));
+        // Откосы: тень сверху и слева внутри проёма, светлый подоконник, наличник вокруг (у кирпича и старого города).
+        float depthShade = 1.0 - 0.55 * (step(wy1 - 0.08, fv) + step(fu, wx0 + 0.05) * step(0.01, wx0)) * win;
+        float sill = step(wy0 - 0.06, fv) * step(fv, wy0) * step(wx0 - 0.03, fu) * step(fu, wx1 + 0.03) * step(0.01, wx0);
+        float frame = (style >= 2) ? (1.0 - win) * step(wx0 - 0.07, fu) * step(fu, wx1 + 0.07) * step(wy0 - 0.06, fv) * step(fv, wy1 + 0.07) : 0.0;
+        vec3 fac = mat;
+        fac = mix(fac, vec3(0.95, 0.93, 0.9), frame * 0.8);
+        fac = mix(fac, fac * 1.3 + 0.08, sill);
+        fac = mix(fac, glass * depthShade, win);
+        fac *= (0.66 + 0.34 * sun) * foot;
+        c = mix(c, fac, wnear);
       }
       c = mix(c, uFogColor, smoothstep(uFog.x, uFog.y, d));
       outColor = vec4(c, 1.0);

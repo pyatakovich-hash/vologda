@@ -60,7 +60,19 @@ export async function loadTerrain(config, { half = 4600, n = 384, zoom = 13 } = 
   const texture = new THREE.DataTexture(grid, n, n, THREE.RedFormat, THREE.FloatType);
   texture.needsUpdate = true;
   console.log(`terrain: ${lo.toFixed(1)}–${hi.toFixed(1)} м над морем, преувеличение ×${exag.toFixed(1)}`);
-  return { H, texture, rect: new THREE.Vector4(min, min, cell, n), exag, lo, hi, base };
+  // Невидимая поверхность рельефа (только глубина), на 10 м ниже земли: прячет всё, что за холмом,
+  // но не перекрывает дороги, воду в долине и набережные (берега при преувеличении ×3 поднимаются круто).
+  const pos = new Float32Array(n * n * 3), idx = new Uint32Array((n - 1) * (n - 1) * 6);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) { const k = j * n + i; pos.set([min + i * cell, grid[k] - 10, min + j * cell], k * 3); }
+  let q = 0;
+  for (let j = 0; j < n - 1; j++) for (let i = 0; i < n - 1; i++) { const a = j * n + i; idx.set([a, a + n, a + 1, a + 1, a + n, a + n + 1], q); q += 6; }
+  const og = new THREE.BufferGeometry();
+  og.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  og.setIndex(new THREE.BufferAttribute(idx, 1));
+  const occluder = new THREE.Mesh(og, new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide }));
+  occluder.renderOrder = -4;
+  occluder.frustumCulled = false;
+  return { H, texture, rect: new THREE.Vector4(min, min, cell, n), exag, lo, hi, base, occluder };
 }
 
 /** Посадить плитки подложки на рельеф и наложить отмывку склонов (свет с северо-запада). */
