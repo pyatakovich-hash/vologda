@@ -435,7 +435,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
 
   // ---------- Фото с Викисклада ----------
   async function loadPhotos() {
-    const KEY = 'vologda-photos-v2', N = 8, CELL = 512;
+    const KEY = 'vologda-landmarks-v1';
     let list = null;
     try { list = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { /* нет хранилища */ }
     if (!list) {
@@ -446,7 +446,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
         SERVICE wikibase:label { bd:serviceParam wikibase:language "ru,en". } } LIMIT 3000`;
       const r = await fetch('https://query.wikidata.org/sparql?format=json&query=' + encodeURIComponent(q), { headers: { Accept: 'application/sparql-results+json' } });
       const rows = (await r.json()).results.bindings;
-      // Ближайшее здание в 25 м; улицы, памятники, реки и т. п. пропускаем.
+      // Ближайшее здание в 18 м; улицы, памятники, реки и т. п. пропускаем.
       const skip = /улиц|проспект|площад|набережн|мост|сквер|парк|памятник|бюст|скульптур|стела|река|озер|район|кладбищ|переулок|бульвар|остров|сад\b/i;
       const hash = new Map();
       for (let g = 0; g < centroids.length / 2; g++) { const k = `${Math.floor(centroids[g * 2] / 50)},${Math.floor(centroids[g * 2 + 1] / 50)}`; if (!hash.has(k)) hash.set(k, []); hash.get(k).push(g); }
@@ -466,45 +466,14 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
         picks.push({ gid: best, file: decodeURIComponent(row.image.value.split('/').pop()), d: Math.hypot(x, z), label: row.itemLabel?.value });
       }
       picks.sort((a, b) => a.d - b.d);
-      list = picks.slice(0, N * N);
-      // Ссылки на превью (512 px) через API Викисклада, по 40 файлов за запрос.
-      for (let i = 0; i < list.length; i += 40) {
-        const part = list.slice(i, i + 40), titles = part.map(p => 'File:' + p.file).join('|');
-        const j = await fetch('https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&prop=imageinfo&iiprop=url&iiurlwidth=512&titles=' + encodeURIComponent(titles)).then(r => r.json());
-        const byTitle = new Map(Object.values(j.query?.pages || {}).map(pg => [pg.title, pg.imageinfo?.[0]?.thumburl]));
-        const norm = new Map((j.query?.normalized || []).map(n => [n.from, n.to]));
-        for (const p of part) { const t = 'File:' + p.file; p.url = byTitle.get(norm.get(t) || t) || byTitle.get(t.replace(/_/g, ' ')); }
-      }
-      list = list.filter(p => p.url);
+      list = picks.slice(0, 160).map(p => ({ gid: p.gid, label: p.label }));
       try { localStorage.setItem(KEY, JSON.stringify(list)); } catch { /* не страшно */ }
     }
-    const atlas = document.createElement('canvas');
-    atlas.width = atlas.height = N * CELL;
-    const ctx = atlas.getContext('2d');
-    ctx.fillStyle = '#20103a'; ctx.fillRect(0, 0, atlas.width, atlas.height);
+    // Фото больше не тянем: здание из Wikidata только помечается как именное, фактуру рисует шейдер.
     const data = uniforms.uBld.value.image.data;
-    let ok = 0;
-    await Promise.all(list.map((p, slot) => new Promise(done => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        // Берём середину кадра — обычно это сам фасад: без неба сверху, мостовой снизу и соседей по краям.
-        const sw = img.width * 0.5, sh = Math.min(img.height * 0.5, sw / 1.4), sx = img.width * 0.25, sy = img.height * 0.22;
-        ctx.drawImage(img, sx, sy, sw, sh, (slot % N) * CELL, Math.floor(slot / N) * CELL, CELL, CELL);
-        data[p.gid * 4 + 1] = slot + 1;
-        ok++;
-        done();
-      };
-      img.onerror = done;
-      img.src = p.url;
-    })));
-    const tex = new THREE.CanvasTexture(atlas);
-    tex.colorSpace = THREE.NoColorSpace;
-    tex.anisotropy = 4;
-    uniforms.uAtlas.value = tex;
-    uniforms.uAtlasN.value = N;
+    for (const p of list) data[p.gid * 4 + 1] = 1;
     uniforms.uBld.value.needsUpdate = true;
-    console.log(`sim: фото Викисклада на ${ok} зданиях`);
+    console.log(`sim: именные здания с фактурой — ${list.length}`);
     S.photos = list;
   }
 
@@ -758,7 +727,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
       markRoads(vice.getNet().ways);
       computeCentroids();
       buildRoofs();
-      loadPhotos().catch(err => console.warn('sim: фото с Викисклада не загрузились', err));
+      loadPhotos().catch(err => console.warn('sim: список именных зданий из Wikidata не загрузился', err));
     }
     for (const b of growing) if (!setInstance(b)) growing.delete(b);
     if (zoneDirty) redrawZones();

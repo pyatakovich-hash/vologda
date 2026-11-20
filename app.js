@@ -467,15 +467,53 @@ const FRAG = /* glsl */`
       float d = length(vWorld - cameraPosition);
       // Ночные окна: сетка по стенам, часть горит тёплым светом, редкие — неоном.
       float wnear = 1.0 - smoothstep(500.0, 1400.0, d);
-      // Фото с Викисклада на стенах здания (атлас 8×8; фото повторяется по ширине фасада).
-      if (vSlot > 0.5 && abs(n.y) < 0.3 && wnear > 0.0) {
-        vec2 t = normalize(vec2(-n.z, n.x));
-        float H0 = max(vFloorsH, 6.0);
-        float pu = fract(dot(vWorld.xz, t) / 8.4), pv = fract(max(hy, 0.0) / 6.0); // кусок фасада с фото как материал стены: ~2 этажа на повтор
-        float s = vSlot - 1.0, cx = mod(s, uAtlasN), cy = floor(s / uAtlasN);
-        vec2 uv = vec2((cx + 0.02 + pu * 0.96) / uAtlasN, 1.0 - (cy + 1.0 - (0.02 + pv * 0.96)) / uAtlasN);
-        vec3 ph = texture(uAtlas, uv).rgb;
-        c = mix(c, ph * (0.72 + 0.28 * sun) * 1.12, wnear);
+      // Именные здания (есть в Wikidata): придуманная фактура «вологодского классицизма» — цветная штукатурка,
+      // белые лопатки, руст, тяги, карниз с сухариками, окна в наличниках с сандриками, на втором этаже — арочные.
+      if (vSlot > 0.5 && wnear > 0.0 && (abs(n.y) < 0.3 || n.y > 0.9)) {
+        float seed = fract(sin(vGid * 12.9898) * 43758.5453);
+        vec3 white = vec3(0.97, 0.95, 0.91);
+        if (n.y > 0.9) {
+          float seam = step(0.86, fract((vWorld.x + vWorld.z) / 1.6));
+          vec3 roof = seed < 0.5 ? vec3(0.24, 0.5, 0.42) : vec3(0.48, 0.5, 0.56);
+          c = mix(c, mix(roof, roof * 1.4, seam) * 1.04, wnear);
+        } else {
+          vec2 t = normalize(vec2(-n.z, n.x));
+          float u = dot(vWorld.xz, t), y = max(hy, 0.0);
+          vec3 base = seed < 0.2 ? vec3(0.93, 0.78, 0.45) : seed < 0.4 ? vec3(0.66, 0.86, 0.77) : seed < 0.6 ? vec3(0.95, 0.73, 0.7)
+                    : seed < 0.8 ? vec3(0.64, 0.78, 0.92) : vec3(0.95, 0.89, 0.77);
+          float fh = 3.6, bay = 3.4, H0 = max(vFloorsH * 1.2, 7.0);
+          float fu = fract(u / bay), fv = fract(y / fh), floorI = floor(y / fh), top = H0 - y;
+          vec3 col = base;
+          if (y < fh) col *= 0.9 + 0.1 * step(0.12, fract(y / 0.5));                       // руст первого этажа
+          float pu = fract(u / (bay * 2.0) + 0.25), pil = step(pu, 0.09);
+          col = mix(col, white * 0.96, pil);                                                   // лопатки
+          col *= 1.0 - 0.18 * step(0.09, pu) * step(pu, 0.115);                                // тень от лопатки
+          col = mix(col, white, step(0.93, fv) * step(1.0, y));                                // междуэтажная тяга
+          col *= 1.0 - 0.22 * step(0.89, fv) * step(fv, 0.93);                                 // тень под тягой
+          col = mix(col, white, step(top, 0.9) * step(0.0, top));                              // венчающий карниз
+          col *= 1.0 - 0.3 * step(0.5, fract(u / 0.35)) * step(top, 0.55) * step(0.3, top);   // сухарики
+          col *= 1.0 - 0.25 * step(0.9, top) * step(top, 1.2);                                 // тень под карнизом
+          float wx = abs(fu - 0.5) * bay, wy = fv * fh;
+          float wHalf = 0.55, wBot = 0.85, wTop = 2.55, arch = floorI == 1.0 ? 1.0 : 0.0, free = (1.0 - pil) * step(1.5, top);
+          float inRect = step(wx, wHalf) * step(wBot, wy) * step(wy, wTop);
+          float inArch = arch * step(length(vec2(wx, wy - wTop)), wHalf) * step(wTop, wy);
+          float win = max(inRect, inArch) * free;
+          float frm = max(step(wx, wHalf + 0.16) * step(wBot - 0.12, wy) * step(wy, wTop + 0.12),
+                          arch * step(length(vec2(wx, wy - wTop)), wHalf + 0.17) * step(wTop, wy)) * (1.0 - win) * free;
+          float pedH = 0.42 * (1.0 - wx / (wHalf + 0.32));
+          float ped = (1.0 - arch) * step(wTop + 0.22, wy) * step(wy, wTop + 0.22 + pedH) * step(wx, wHalf + 0.32) * free;   // сандрик
+          float key = arch * step(wx, 0.1) * step(wTop + wHalf - 0.06, wy) * step(wy, wTop + wHalf + 0.22) * free;          // замковый камень
+          col = mix(col, white, max(max(frm, ped), key));
+          col *= 1.0 - 0.28 * (1.0 - arch) * step(wTop + 0.12, wy) * step(wy, wTop + 0.22) * step(wx, wHalf + 0.32) * free; // тень под сандриком
+          float h = fract(sin(dot(floor(vec2(u / bay, y / fh)) + vGid * 0.731, vec2(127.1, 311.7))) * 43758.5453);
+          vec3 glass = mix(vec3(0.08, 0.07, 0.16), vec3(1.0, 0.82, 0.52), step(0.45, h));
+          glass = mix(glass, white * 0.8, clamp(step(wx, 0.04) + step(abs(wy - 1.9), 0.04), 0.0, 1.0));                     // переплёт
+          glass *= 1.0 - 0.45 * clamp(step(wTop - 0.15, wy) * inRect + step(wHalf - 0.08, wx), 0.0, 1.0);                   // откосы
+          col = mix(col, glass, win);
+          col = mix(col, white * 1.05, step(wx, wHalf + 0.1) * step(wBot - 0.1, wy) * step(wy, wBot) * free);               // подоконник
+          col = mix(col, vColor, 0.1);
+          c = mix(c, col * (0.68 + 0.32 * sun) * foot, wnear);
+        }
       } else if (vKind > 0.5 && wnear > 0.0) {
         vec2 t = normalize(vec2(-n.z, n.x));
         float u = dot(vWorld.xz, t), y = hy;
