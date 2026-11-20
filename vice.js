@@ -407,7 +407,7 @@ function spawn(net, car) {
   return {
     w: wi, i, dir, d: Math.random() * segLen(w, i, i + dir),
     speed: car ? 9 + Math.random() * 9 : 1.6 + Math.random() * 1.2,
-    off: car ? 2.6 : (Math.random() < 0.5 ? -1 : 1) * (w.f ? 0.8 : 6 + Math.random() * 2), // по тротуару, на пешеходных — по середине
+    off: car ? 3.2 : (Math.random() < 0.5 ? -1 : 1) * (w.f ? 0.8 : 6.5 + Math.random() * 2), // полосы шире — встречные не трутся; люди по тротуару
     phase: Math.random() * 10, car,
   };
 }
@@ -1285,7 +1285,8 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
   const pos = new THREE.Vector2(), vel = new THREE.Vector2();
   let ang = 0, money = 0, mission = null, shake = 0, lastBump = 0;
   // Углы машины игрока (длина ~11 м, ширина ~4,8 м) плюс середины бортов.
-  const PROBES = [[4.8, 1.8], [4.8, -1.8], [-4.8, 1.8], [-4.8, -1.8], [0, 1.95], [0, -1.95], [5.0, 0]];
+  // Точки столкновения с домами — чуть внутри кузова (он ~10×4 м): узкие улицы старого города проезжаемы, задевать углы можно.
+  const PROBES = [[3.4, 1.2], [3.4, -1.2], [-3.4, 1.2], [-3.4, -1.2], [0, 1.3], [0, -1.3], [3.8, 0]];
   function hits(x, z, a) {
     const fx = Math.cos(a), fz = -Math.sin(a);
     for (const [l, w] of PROBES) if (blocked(x + fx * l - fz * w, z + fz * l + fx * w)) return true;
@@ -1393,13 +1394,19 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
       bump(sp);
     }
     // Другие машины: расталкиваемся, встречная машина замирает на пару секунд.
+    // Столкновение — только если машина реально перед нами или под нами: в системе координат игрока
+    // вдоль ±5,5 м и поперёк ±2,2 м. Встречная полоса (в ~6 м сбоку) больше не мешает.
+    const cfx = Math.cos(ang), cfz = -Math.sin(ang);
     for (const a of agents) {
       if (!a.car || a.x === undefined) continue;
-      const dx = pos.x - a.x, dz = pos.y - a.z, d2 = dx * dx + dz * dz;
-      if (d2 > 64) continue;
-      const d = Math.sqrt(d2) || 1, ux = dx / d, uz = dz / d, vn = vel.x * ux + vel.y * uz;
-      if (vn < 0) { vel.x -= 1.5 * vn * ux; vel.y -= 1.5 * vn * uz; bump(-vn); }
-      if (!hits(pos.x + ux * (8 - d), pos.y + uz * (8 - d), ang)) { pos.x += ux * (8 - d); pos.y += uz * (8 - d); }
+      const dx = pos.x - a.x, dz = pos.y - a.z;
+      if (dx * dx + dz * dz > 49) continue;
+      const along = -(dx * cfx + dz * cfz), side = -(dx * -cfz + dz * cfx);
+      if (Math.abs(along) > 5.5 || Math.abs(side) > 2.2) continue;
+      const d = Math.hypot(dx, dz) || 1, ux = dx / d, uz = dz / d, vn = vel.x * ux + vel.y * uz;
+      if (vn < 0) { vel.x -= 1.3 * vn * ux; vel.y -= 1.3 * vn * uz; bump(-vn); }
+      const push = Math.min(1.5, 5.5 - Math.abs(along));
+      if (!hits(pos.x + ux * push, pos.y + uz * push, ang)) { pos.x += ux * push; pos.y += uz * push; }
       if (vel.length() > 2) a.stun = 1.2;
     }
     const gy = H(pos.x, pos.y);
