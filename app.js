@@ -172,7 +172,7 @@ initBasemap(flat, config).then(g => {
 });
 
 // Машины, пешеходы, закатное небо и пасхалка (vice.js).
-const vice = initVice(scene, config);
+const vice = initVice(scene, config, camera, controls);
 
 // ---------- Street and canal names ----------
 // Flat on the ground, turned along the street (pipeline/s07_labels.py). Textures are drawn on first use.
@@ -1912,8 +1912,8 @@ renderer.setAnimationLoop(now => {
   frame++;
   stepFlight(now);
   uniforms.uNow.value = now / 1000;
-  controls.update();
-  const dist = camera.position.distanceTo(controls.target);
+  if (!vice.driving()) controls.update();
+  const dist = vice.driving() ? 380 : camera.position.distanceTo(controls.target);
   uniforms.uFog.value.set(dist * 1.6, dist * 4);
   if (frame % 6 === 0) updateLabels(dist);
   vice.update(now);
@@ -1925,7 +1925,7 @@ renderer.setAnimationLoop(now => {
     if (t >= 1) stopPlay();
     drawHist();
   }
-  if (pointer && !dragging && frame % 3 === 0) {
+  if (pointer && !dragging && frame % 3 === 0 && !vice.driving()) {
     const gid = pick(pointer[0], pointer[1]);
     uniforms.uHover.value = gid;
     showCard(gid, pointer[0], pointer[1]);

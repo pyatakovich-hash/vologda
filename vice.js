@@ -19,7 +19,7 @@ const SHIRTS = [NEON.pink, NEON.cyan, NEON.yellow, NEON.white, NEON.orange, '#7d
 const N_CARS = 3000;
 const N_PEOPLE = 5000;
 const CAR_SCALE = 2.4;      // машины и люди крупнее настоящих, чтобы их было видно с обзорной высоты
-const PERSON_SCALE = 2.6;
+const PERSON_SCALE = 1.9;
 const SPAWN_RADIUS = 2600;  // м от центра: здесь машины и люди появляются, дальше просто уезжают
 
 const CACHE_KEY = 'vologda-vice-roads-v2';
@@ -291,46 +291,109 @@ function advance(net, a, dist) {
   return { x: x0 + (x1 - x0) * t - fz * a.off, z: z0 + (z1 - z0) * t + fx * a.off, ang: Math.atan2(-fz, fx) };
 }
 
-// ---------- Пасхалка: «Ночной заезд» и радио «Кружево FM» ----------
+// ---------- Радио: синтезатор на Web Audio + ведущий через синтез речи ----------
 const midi = m => 440 * 2 ** ((m - 69) / 12);
-const CHORDS = [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]]; // ля минор — фа — до — соль
-let ac = null, master = null, synthTimer = 0, nextBar = 0, bar = 0;
-function note(type, f, t, d, v) {
+const STATIONS = [
+  { name: 'Кружево FM 87,5', genre: 'синтвейв', style: 'synth', chords: [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]] },
+  { name: 'Масло FM 91,2', genre: 'итало-диско', style: 'italo', chords: [[60, 64, 67], [57, 60, 64], [53, 57, 60], [55, 59, 62]] },
+  { name: 'Вологда Говорит 72,1', genre: 'разговорное радио', style: 'talk', chords: [[50, 57, 62], [48, 55, 60]] },
+];
+const ADS = [
+  'Вологодское масло. Масло, которое тебя понимает.',
+  'Кружевные бронежилеты фабрики «Снежинка». Защищают. И украшают.',
+  'Автосалон «Кремлёвский дрифт»: подержанные «Жигули» цвета фламинго. Кредит под залог валенок.',
+  'Пробки на Советском проспекте: стоят все, кроме вас. Вы стоите больше.',
+  'Погода: над Вологдой вечный закат. Синоптики не знают почему и не хотят знать.',
+  'Новости: на Соборной горке снова видели пальму. Мэрия всё отрицает.',
+  'Прокат кассет «Видеокремль»: новые боевики каждую пятницу. Вернуть до тысяча сто сорок седьмого года.',
+  'Курьерская служба «Бочка»: довезём масло, пока оно не растаяло. Или вернём сливки.',
+];
+let ac = null, master = null, synthTimer = 0, nextBar = 0, bar = 0, station = 0, adTimer = 0, adIdx = 0;
+function note(type, f, t, d, v, slide) {
   const o = ac.createOscillator(), g = ac.createGain();
-  o.type = type; o.frequency.value = f;
+  o.type = type; o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + d);
   g.gain.setValueAtTime(0.0001, t);
-  g.gain.linearRampToValueAtTime(v, t + 0.01);
+  g.gain.linearRampToValueAtTime(v, t + 0.008);
   g.gain.exponentialRampToValueAtTime(0.0001, t + d);
   o.connect(g).connect(master);
   o.start(t); o.stop(t + d + 0.05);
 }
 function scheduleBar(t0) {
-  const ch = CHORDS[bar++ % 4];
+  const st = STATIONS[station], ch = st.chords[bar++ % st.chords.length];
+  if (st.style === 'talk') { // тихая подложка под голос
+    for (const m of ch) note('triangle', midi(m), t0, 2.1, 0.05);
+    return;
+  }
   for (let s = 0; s < 16; s++) {
     const t = t0 + s * 0.125;
-    if (s % 2 === 0) note('sawtooth', midi(ch[0] - 24), t, 0.22, 0.5);
-    note('square', midi(ch[[0, 1, 2, 1][s % 4]] + 12), t, 0.11, 0.1);
-    if (s % 4 === 0) note('triangle', midi(ch[2] + 24), t, 0.5, 0.06);
+    if (st.style === 'synth') {
+      if (s % 2 === 0) note('sawtooth', midi(ch[0] - 24), t, 0.22, 0.5);
+      note('square', midi(ch[[0, 1, 2, 1][s % 4]] + 12), t, 0.11, 0.1);
+      if (s % 4 === 0) note('triangle', midi(ch[2] + 24), t, 0.5, 0.06);
+    } else {
+      if (s % 4 === 0) note('sine', 140, t, 0.25, 0.9, 40);                       // бочка
+      note('sawtooth', midi(ch[0] - 24 + (s % 2 ? 12 : 0)), t, 0.1, 0.35);        // октавный бас
+      if (s % 2 === 0) note('square', midi(ch[(s / 2) % 3] + 24), t, 0.09, 0.07); // арпеджио
+      if (s % 8 === 4) note('triangle', 1800, t, 0.06, 0.12, 900);                // «хлопок»
+    }
   }
 }
-function startSynth() {
+function speak(text) {
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'ru-RU'; u.rate = 1.05; u.pitch = 0.85;
+    const v = speechSynthesis.getVoices().find(v => v.lang.startsWith('ru'));
+    if (v) u.voice = v;
+    speechSynthesis.speak(u);
+  } catch { /* без голоса — только субтитры */ }
+}
+function subtitle(text) {
+  let el = document.querySelector('.radio-sub');
+  if (!el) { el = document.createElement('div'); el.className = 'radio-sub'; document.body.append(el); }
+  el.textContent = text;
+  el.classList.remove('out'); void el.offsetWidth; el.classList.add('show');
+  clearTimeout(el._t); el._t = setTimeout(() => el.classList.add('out'), 7000);
+}
+function playAd() {
+  const text = ADS[adIdx++ % ADS.length];
+  subtitle(`📻 ${STATIONS[station].name}: ${text}`);
+  if (STATIONS[station].style === 'talk') speak(text);
+}
+function startSynth(i = station) {
+  stopSynth();
+  station = i;
   try {
     ac ??= new AudioContext();
     ac.resume();
     master = ac.createGain();
     master.gain.value = 0.07;
     const lp = ac.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = 2400;
+    lp.type = 'lowpass'; lp.frequency.value = 2600;
     master.connect(lp).connect(ac.destination);
     nextBar = ac.currentTime + 0.05;
     const tick = () => { while (nextBar < ac.currentTime + 2.5) { scheduleBar(nextBar); nextBar += 2; } };
     tick();
     synthTimer = setInterval(tick, 500);
   } catch { /* без звука */ }
+  const st = STATIONS[station];
+  stationBanner(st.name, st.genre);
+  setTimeout(playAd, st.style === 'talk' ? 1200 : 9000);
+  adTimer = setInterval(playAd, st.style === 'talk' ? 12000 : 30000);
 }
 function stopSynth() {
-  clearInterval(synthTimer);
+  clearInterval(synthTimer); clearInterval(adTimer);
+  try { speechSynthesis.cancel(); } catch { /* нет синтеза речи */ }
   if (ac && master) master.gain.setTargetAtTime(0, ac.currentTime, 0.15);
+  master = null;
+}
+function stationBanner(name, genre) {
+  document.querySelector('.radio-name')?.remove();
+  const el = document.createElement('div');
+  el.className = 'radio-name';
+  el.innerHTML = `<b>${name}</b><span>${genre}</span>`;
+  document.body.append(el);
+  setTimeout(() => el.remove(), 2800);
 }
 
 function toast(html) {
@@ -348,7 +411,7 @@ export function tintBasemap(group) {
   group?.traverse(m => m.material?.color?.setRGB(2.6, 1.4, 3.6));
 }
 
-export function initVice(scene, config) {
+export function initVice(scene, config, camera, controls) {
   const sky = { dusk: gradientTexture(SKY_DUSK), drive: gradientTexture(SKY_NIGHT_DRIVE) };
   scene.background = sky.dusk;
 
@@ -389,6 +452,7 @@ export function initVice(scene, config) {
     const t = now / 1000, dt = Math.min(0.1, last ? t - last : 0);
     last = t;
     if (!net) return;
+    if (game.driving) driveStep(dt, t);
     const boost = drive ? 3 : 1;
     for (let k = 0; k < agents.length; k++) {
       const a = agents[k];
@@ -414,6 +478,174 @@ export function initVice(scene, config) {
     cars.instanceMatrix.needsUpdate = glow.instanceMatrix.needsUpdate = people.instanceMatrix.needsUpdate = true;
   }
 
+  // ---------- Своя машина и задание «Масло в Кремль» ----------
+  const game = { driving: false };
+  const player = new THREE.Mesh(carGeometry(), new THREE.MeshBasicMaterial({ vertexColors: true, color: NEON.pink }));
+  const pglow = new THREE.Mesh(new THREE.PlaneGeometry(20, 11).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ map: glow.material.map, color: NEON.cyan, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+  pglow.position.y = 0.3;
+  const playerGroup = new THREE.Group();
+  playerGroup.add(player, pglow);
+  playerGroup.visible = false;
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(7, 7, 420, 24, 1, true),
+    new THREE.MeshBasicMaterial({ color: NEON.yellow, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+  beam.position.y = 210;
+  beam.visible = false;
+  group.add(playerGroup, beam);
+
+  const keys = new Set();
+  const pos = new THREE.Vector2(), vel = new THREE.Vector2();
+  let ang = 0, money = 0, mission = null;
+  const hud = document.createElement('div');
+  hud.className = 'game-hud';
+  hud.innerHTML = `<div class="g-money">₽ 0</div><div class="g-timer"></div><div class="g-goal"><i class="g-arrow">➤</i><span></span></div>
+    <p class="g-help">W/S — газ и тормоз · A/D — руль · Пробел — ручник · Q/E — радио · F — выйти</p>`;
+  document.body.append(hud);
+  const btn = document.createElement('button');
+  btn.className = 'drive-btn';
+  btn.textContent = 'Сесть за руль (F)';
+  btn.onclick = () => toggleDrive();
+  document.body.append(btn);
+
+  function nearestVertex(x, z, filter = () => true) {
+    let best = null, bd = Infinity;
+    for (const w of net.ways) {
+      if (!filter(w)) continue;
+      for (let i = 0; i < w.p.length; i += 2) {
+        const d = (w.p[i] - x) ** 2 + (w.p[i + 1] - z) ** 2;
+        if (d < bd) { bd = d; best = { w, i: i / 2 }; }
+      }
+    }
+    return best;
+  }
+  function randomPickup() {
+    for (let k = 0; k < 200; k++) {
+      const w = net.ways[net.randomCarWay()], i = Math.floor(Math.random() * (w.p.length / 2));
+      const x = w.p[2 * i], z = w.p[2 * i + 1], d = Math.hypot(x - pos.x, z - pos.y);
+      if (d > 500 && d < 1300 && Math.hypot(x, z) > 500) return { x, z };
+    }
+    return { x: pos.x + 600, z: pos.y };
+  }
+  function newMission() {
+    const k = nearestVertex(0, 0, w => !w.f);
+    mission = { stage: 'pickup', pickup: randomPickup(), kremlin: { x: k.w.p[2 * k.i], z: k.w.p[2 * k.i + 1] }, time: 0 };
+    banner('Новое задание', 'Забери бочку вологодского масла на складе (жёлтый луч)');
+  }
+  function banner(title, text, cls = '') {
+    toast(`<b>${title}</b><span>${text}</span>`);
+    document.querySelector('.vice-toast')?.classList.add('game', ...(cls ? [cls] : []));
+  }
+  function toggleDrive() {
+    if (!net) { banner('Минутку', 'Улицы ещё грузятся'); return; }
+    game.driving = !game.driving;
+    document.body.classList.toggle('driving', game.driving);
+    playerGroup.visible = game.driving;
+    controls.enabled = !game.driving;
+    btn.textContent = game.driving ? 'Выйти из машины (F)' : 'Сесть за руль (F)';
+    if (game.driving) {
+      const v = nearestVertex(controls.target.x, controls.target.z, w => !w.f);
+      const w = v.w, j = Math.min(v.i + 1, w.p.length / 2 - 1), i = j - 1;
+      pos.set(w.p[2 * i], w.p[2 * i + 1]);
+      ang = Math.atan2(-(w.p[2 * j + 1] - w.p[2 * i + 1]), w.p[2 * j] - w.p[2 * i]);
+      vel.set(0, 0);
+      camera.position.set(pos.x - Math.cos(ang) * 40, 25, pos.y + Math.sin(ang) * 40);
+      if (!mission) newMission();
+      beam.visible = true;
+      startSynth(station);
+    } else {
+      stopSynth();
+      beam.visible = false;
+      controls.target.set(pos.x, 0, pos.y);
+      camera.position.set(pos.x + 200, 220, pos.y + 300);
+      controls.update();
+    }
+  }
+
+  function driveStep(dt, t) {
+    const fx = Math.cos(ang), fz = -Math.sin(ang), rx = -fz, rz = fx;
+    let vf = vel.x * fx + vel.y * fz, vl = vel.x * rx + vel.y * rz;
+    const up = keys.has('w') || keys.has('arrowup'), down = keys.has('s') || keys.has('arrowdown');
+    const left = keys.has('a') || keys.has('arrowleft'), right = keys.has('d') || keys.has('arrowright');
+    const hand = keys.has(' ');
+    if (up) vf = Math.min(48, vf + 24 * dt);
+    if (down) vf = vf > 0.5 ? vf - 42 * dt : Math.max(-12, vf - 12 * dt);
+    vf *= Math.exp(-(up || down ? 0.15 : 0.7) * dt);
+    if (hand) vf *= Math.exp(-1.1 * dt);
+    const steer = (left ? 1 : 0) - (right ? 1 : 0);
+    ang += steer * (hand ? 3.2 : 2.1) * dt * Math.max(-1, Math.min(1, vf / 10));
+    vl *= Math.exp(-(hand ? 1.2 : 9) * dt);
+    const nfx = Math.cos(ang), nfz = -Math.sin(ang);
+    vel.set(nfx * vf + -nfz * vl, nfz * vf + nfx * vl);
+    pos.addScaledVector(vel, dt);
+    player.position.set(pos.x, 0, pos.y);
+    player.rotation.set(0, ang, 0);
+    pglow.position.set(pos.x, 0.3, pos.y);
+    pglow.rotation.set(0, ang, 0);
+    pglow.material.opacity = 0.6 + Math.min(0.4, Math.abs(vl) / 10);
+    // Камера сзади и сверху, догоняет плавно; на скорости отъезжает.
+    const back = 34 + Math.abs(vf) * 0.35;
+    const k = 1 - Math.exp(-5 * dt);
+    camera.position.x += (pos.x - nfx * back - camera.position.x) * k;
+    camera.position.y += (14 + Math.abs(vf) * 0.12 - camera.position.y) * k;
+    camera.position.z += (pos.y - nfz * back - camera.position.z) * k;
+    camera.lookAt(pos.x + nfx * 14, 2, pos.y + nfz * 14);
+    controls.target.set(pos.x, 0, pos.y);
+
+    // Задание
+    beam.visible = mission.stage !== 'wait';
+    if (mission.stage === 'wait') return;
+    const target = mission.stage === 'pickup' ? mission.pickup : mission.kremlin;
+    beam.position.set(target.x, 210, target.z);
+    beam.material.color.set(mission.stage === 'pickup' ? NEON.yellow : NEON.pink);
+    beam.material.opacity = 0.28 + 0.1 * Math.sin(t * 4);
+    const dx = target.x - pos.x, dz = target.z - pos.y, dist = Math.hypot(dx, dz);
+    const rel = Math.atan2(-dz, dx) - ang;
+    hud.querySelector('.g-arrow').style.transform = `rotate(${-rel - Math.PI / 2}rad)`;
+    hud.querySelector('.g-goal span').textContent = (mission.stage === 'pickup' ? 'Склад масла' : 'Кремль') + ` · ${Math.round(dist)} м`;
+    if (mission.stage === 'deliver') {
+      mission.time -= dt;
+      hud.querySelector('.g-timer').textContent = `${Math.max(0, Math.ceil(mission.time))} с`;
+      hud.querySelector('.g-timer').classList.toggle('hot', mission.time < 10);
+      if (mission.time <= 0) {
+        mission.stage = 'pickup';
+        hud.querySelector('.g-timer').textContent = '';
+        banner('Масло растаяло', 'Вернись на склад за новой бочкой', 'fail');
+      }
+    }
+    if (dist < 16) {
+      if (mission.stage === 'pickup') {
+        mission.stage = 'deliver';
+        mission.time = Math.round(Math.hypot(mission.kremlin.x - pos.x, mission.kremlin.z - pos.y) / 11 + 25);
+        banner('Бочка на борту', `Довези масло в Кремль за ${mission.time} секунд (розовый луч)`);
+      } else {
+        const prize = 500 + Math.round(mission.time) * 20;
+        money += prize;
+        hud.querySelector('.g-money').textContent = `₽ ${money.toLocaleString('ru')}`;
+        hud.querySelector('.g-timer').textContent = '';
+        banner('Задание выполнено', `+${prize.toLocaleString('ru')} ₽ · масло доставлено в Кремль`, 'win');
+        mission = { stage: 'wait' };
+        setTimeout(() => { if (game.driving) newMission(); else mission = null; }, 3500);
+      }
+    }
+  }
+
+  addEventListener('keydown', e => {
+    if (e.target.closest?.('input, textarea, [contenteditable]')) return;
+    const k = e.key.toLowerCase();
+    if (k === 'f' || k === 'а') { toggleDrive(); return; }
+    if (!game.driving) return;
+    const map = { 'ц': 'w', 'ы': 's', 'ф': 'a', 'в': 'd', 'й': 'q', 'у': 'e' };
+    const kk = map[k] || k;
+    if (kk === 'q' || kk === 'e') { startSynth((station + (kk === 'e' ? 1 : STATIONS.length - 1)) % STATIONS.length); return; }
+    keys.add(kk);
+    if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(kk)) e.preventDefault();
+  });
+  addEventListener('keyup', e => {
+    const k = e.key.toLowerCase(), map = { 'ц': 'w', 'ы': 's', 'ф': 'a', 'в': 'd' };
+    keys.delete(map[k] || k);
+  });
+  addEventListener('blur', () => keys.clear());
+
   // Набери 1147 — включится «Ночной заезд».
   let typed = '';
   addEventListener('keydown', e => {
@@ -426,7 +658,7 @@ export function initVice(scene, config) {
     glow.material.opacity = drive ? 1 : 0.85;
     document.body.classList.toggle('vice-drive', drive);
     if (drive) {
-      startSynth();
+      startSynth(0);
       toast('<b>1147 · Ночной заезд</b><span>В эфире «Кружево FM 87,5» — синтвейв над Вологдой с 1147 года.</span><small>Набери 1147 ещё раз, чтобы заглушить мотор.</small>');
     } else {
       stopSynth();
@@ -434,5 +666,5 @@ export function initVice(scene, config) {
     }
   });
 
-  return { group, update };
+  return { group, update, driving: () => game.driving };
 }
