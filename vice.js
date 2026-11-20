@@ -59,16 +59,20 @@ function radialTexture() {
 }
 
 // ---------- Геометрия: коробки с «запечённым» светом по нормалям ----------
-function shadedBox(w, h, d, x, y, z, tone = 1) {
+function shadedBox(w, h, d, x, y, z, tone = 1, rgb = [1, 1, 1]) {
   const g = new THREE.BoxGeometry(w, h, d).toNonIndexed();
   g.translate(x, y, z);
   const n = g.attributes.normal, colors = new Float32Array(n.count * 3);
   for (let i = 0; i < n.count; i++) {
     const k = tone * (0.62 + 0.38 * n.getY(i) + 0.12 * n.getX(i) - 0.06 * n.getZ(i));
-    colors.set([k, k, k], i * 3);
+    colors.set([k * rgb[0], k * rgb[1], k * rgb[2]], i * 3);
   }
   g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   g.deleteAttribute('uv');
+  return g;
+}
+function tilted(g, rx, ry, rz, x, y, z) {
+  g.rotateX(rx); g.rotateY(ry); g.rotateZ(rz); g.translate(x, y, z);
   return g;
 }
 function merge(parts) {
@@ -84,25 +88,74 @@ function merge(parts) {
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   return g;
 }
+// Кузов красится цветом экземпляра; фары и стоп-сигналы — отдельный меш со своим светом.
 function carGeometry() {
-  const s = CAR_SCALE;
-  const g = merge([
-    shadedBox(4.6, 1.1, 2.0, 0, 0.9, 0),            // кузов
-    shadedBox(2.3, 0.7, 1.8, -0.35, 1.8, 0, 0.28),  // тёмная кабина
-    shadedBox(0.12, 0.28, 1.7, 2.32, 1.0, 0, 4),    // фары
-  ]);
-  g.scale(s, s, s);
+  const parts = [
+    shadedBox(4.6, 0.75, 2.0, 0, 0.75, 0),             // нижняя часть кузова
+    shadedBox(4.4, 0.3, 1.94, 0.05, 1.27, 0, 0.92),    // пояс
+    shadedBox(2.2, 0.62, 1.78, -0.35, 1.72, 0, 0.9),   // крыша и стойки
+    shadedBox(2.0, 0.5, 1.82, -0.35, 1.7, 0, 0.22),    // стёкла
+    shadedBox(0.25, 0.2, 2.06, 2.3, 0.55, 0, 0.35),    // передний бампер
+    shadedBox(0.25, 0.2, 2.06, -2.3, 0.55, 0, 0.35),   // задний бампер
+  ];
+  for (const x of [1.45, -1.45]) for (const z of [0.95, -0.95]) parts.push(shadedBox(0.82, 0.82, 0.32, x, 0.41, z, 0.09)); // колёса
+  const g = merge(parts);
+  g.scale(CAR_SCALE, CAR_SCALE, CAR_SCALE);
   return g;
 }
-function personGeometry() {
-  const s = PERSON_SCALE;
-  const g = merge([
-    shadedBox(0.5, 0.8, 0.32, 0, 0.4, 0, 0.35),   // ноги
-    shadedBox(0.6, 0.7, 0.38, 0, 1.15, 0),        // рубашка
-    shadedBox(0.34, 0.34, 0.34, 0, 1.7, 0, 0.9),  // голова
-  ]);
-  g.scale(s, s, s);
+function carLightsGeometry() {
+  const parts = [];
+  for (const z of [0.62, -0.62]) {
+    parts.push(shadedBox(0.08, 0.22, 0.42, 2.33, 0.95, z, 1.6, [1, 0.97, 0.85])); // фары
+    parts.push(shadedBox(0.08, 0.2, 0.46, -2.33, 0.98, z, 1.6, [1, 0.08, 0.15])); // стоп-сигналы
+  }
+  const g = merge(parts);
+  g.scale(CAR_SCALE, CAR_SCALE, CAR_SCALE);
   return g;
+}
+// Рубашка и руки красятся цветом экземпляра; джинсы, лицо и волосы — свои.
+function shirtGeometry() {
+  const g = merge([
+    shadedBox(0.3, 0.68, 0.48, 0, 1.18, 0),
+    shadedBox(0.16, 0.62, 0.14, 0, 1.12, 0.33, 0.9),
+    shadedBox(0.16, 0.62, 0.14, 0, 1.12, -0.33, 0.9),
+  ]);
+  g.scale(PERSON_SCALE, PERSON_SCALE, PERSON_SCALE);
+  return g;
+}
+function personBaseGeometry() {
+  const g = merge([
+    shadedBox(0.22, 0.84, 0.17, 0, 0.42, 0.12, 1, [0.22, 0.28, 0.55]),
+    shadedBox(0.22, 0.84, 0.17, 0, 0.42, -0.12, 1, [0.22, 0.28, 0.55]),
+    shadedBox(0.3, 0.32, 0.28, 0, 1.68, 0, 1, [1, 0.8, 0.66]),      // лицо
+    shadedBox(0.33, 0.1, 0.31, -0.01, 1.87, 0, 1, [0.16, 0.1, 0.08]), // волосы
+    shadedBox(0.07, 0.07, 0.34, 0.16, 1.72, 0, 1, [0.05, 0.05, 0.08]), // тёмные очки
+  ]);
+  g.scale(PERSON_SCALE, PERSON_SCALE, PERSON_SCALE);
+  return g;
+}
+// Фонарь: столб, вынос, неоновый плафон (плафон — отдельный меш цвета экземпляра).
+function lampPoleGeometry() {
+  return merge([
+    shadedBox(0.3, 9, 0.3, 0, 4.5, 0, 0.35, [0.5, 0.45, 0.65]),
+    shadedBox(2.6, 0.22, 0.22, 1.2, 8.9, 0, 0.35, [0.5, 0.45, 0.65]),
+  ]);
+}
+function lampHeadGeometry() { return shadedBox(1.1, 0.35, 0.6, 2.4, 8.7, 0, 1.4); }
+// Пальма: наклонный ствол из сегментов и поникшие листья.
+function palmTrunkGeometry() {
+  const parts = [];
+  for (let i = 0; i < 7; i++) parts.push(shadedBox(0.55 - i * 0.03, 1.45, 0.55 - i * 0.03, i * i * 0.025, 0.7 + i * 1.4, 0, 0.75, [0.62, 0.42, 0.38]));
+  return merge(parts);
+}
+function palmLeavesGeometry() {
+  const parts = [];
+  for (let k = 0; k < 7; k++) {
+    const a = k / 7 * Math.PI * 2;
+    parts.push(tilted(shadedBox(4.2, 0.08, 0.9, 2.0, 0, 0, 1, [0.25, 0.95, 0.7]), 0, 0, -0.45, 0, 0, 0)
+      .rotateY(a).translate(1.0, 10.1, 0));
+  }
+  return merge(parts);
 }
 
 // ---------- Улицы: мини-декодер Mapbox Vector Tile (protobuf) ----------
@@ -288,7 +341,7 @@ function advance(net, a, dist) {
   const x1 = w.p[2 * (a.i + a.dir)], z1 = w.p[2 * (a.i + a.dir) + 1];
   const t = Math.min(1, a.d / L), fx = (x1 - x0) / L, fz = (z1 - z0) / L;
   // Правостороннее движение: смещение вправо от направления (вправо от «на север» — это восток).
-  return { x: x0 + (x1 - x0) * t - fz * a.off, z: z0 + (z1 - z0) * t + fx * a.off, ang: Math.atan2(-fz, fx) };
+  return { x: x0 + (x1 - x0) * t - fz * a.off, z: z0 + (z1 - z0) * t + fx * a.off, ang: Math.atan2(-fz, fx), fx, fz };
 }
 
 // ---------- Радио: синтезатор на Web Audio + ведущий через синтез речи ----------
@@ -411,7 +464,7 @@ export function tintBasemap(group) {
   group?.traverse(m => m.material?.color?.setRGB(2.6, 1.4, 3.6));
 }
 
-export function initVice(scene, config, camera, controls) {
+export function initVice(scene, config, camera, controls, getMeshes = () => []) {
   const sky = { dusk: gradientTexture(SKY_DUSK), drive: gradientTexture(SKY_NIGHT_DRIVE) };
   scene.background = sky.dusk;
 
@@ -419,22 +472,113 @@ export function initVice(scene, config, camera, controls) {
   group.name = 'vice';
   scene.add(group);
 
-  const cars = new THREE.InstancedMesh(carGeometry(), new THREE.MeshBasicMaterial({ vertexColors: true }), N_CARS);
-  const glow = new THREE.InstancedMesh(
-    new THREE.PlaneGeometry(16, 9).rotateX(-Math.PI / 2),
-    new THREE.MeshBasicMaterial({ map: radialTexture(), transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }),
-    N_CARS);
-  const people = new THREE.InstancedMesh(personGeometry(), new THREE.MeshBasicMaterial({ vertexColors: true }), N_PEOPLE);
+  const basic = () => new THREE.MeshBasicMaterial({ vertexColors: true });
+  const additive = color => new THREE.MeshBasicMaterial({ map: glowTex, color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+  const glowTex = radialTexture();
+  const cars = new THREE.InstancedMesh(carGeometry(), basic(), N_CARS);
+  const lights = new THREE.InstancedMesh(carLightsGeometry(), basic(), N_CARS);
+  const glow = new THREE.InstancedMesh(new THREE.PlaneGeometry(16, 9).rotateX(-Math.PI / 2), additive(0xffffff), N_CARS);
+  glow.material.opacity = 0.85;
+  const shirts = new THREE.InstancedMesh(shirtGeometry(), basic(), N_PEOPLE);
+  const bodies = new THREE.InstancedMesh(personBaseGeometry(), basic(), N_PEOPLE);
   const c = new THREE.Color();
   for (let i = 0; i < N_CARS; i++) {
     cars.setColorAt(i, c.set(CAR_COLORS[i % CAR_COLORS.length]));
     glow.setColorAt(i, c.set(GLOW_COLORS[i % GLOW_COLORS.length]));
   }
-  for (let i = 0; i < N_PEOPLE; i++) people.setColorAt(i, c.set(SHIRTS[i % SHIRTS.length]));
-  for (const m of [cars, glow, people]) { m.count = 0; m.frustumCulled = false; group.add(m); }
+  for (let i = 0; i < N_PEOPLE; i++) shirts.setColorAt(i, c.set(SHIRTS[i % SHIRTS.length]));
+  for (const m of [cars, lights, glow, shirts, bodies]) { m.count = 0; m.frustumCulled = false; group.add(m); }
   glow.renderOrder = 1;
 
-  let net = null, agents = [], last = 0, drive = false;
+  // ---------- Карта занятости: где стоят дома (по крышам зданий, клетка 2 м) ----------
+  const G = { size: 2, half: 4000, n: 4000, cells: null };
+  function buildGrid() {
+    const ms = getMeshes();
+    if (!ms.length) return false;
+    const cells = new Uint8Array(G.n * G.n), inv = 1 / G.size;
+    for (const m of ms) {
+      const p = m.geometry.attributes.position.array, idx = m.geometry.index.array;
+      const sc = m.scale.x, ox = m.position.x, oz = m.position.z;
+      for (let t = 0; t < idx.length; t += 3) {
+        const i0 = idx[t] * 3, i1 = idx[t + 1] * 3, i2 = idx[t + 2] * 3;
+        const x0 = p[i0] * sc + ox, z0 = p[i0 + 2] * sc + oz, x1 = p[i1] * sc + ox, z1 = p[i1 + 2] * sc + oz, x2 = p[i2] * sc + ox, z2 = p[i2 + 2] * sc + oz;
+        const area = (x1 - x0) * (z2 - z0) - (x2 - x0) * (z1 - z0);
+        if (Math.abs(area) < 0.5) continue; // стены не нужны, только горизонтальные грани
+        const minX = Math.max(0, Math.floor((Math.min(x0, x1, x2) + G.half) * inv)), maxX = Math.min(G.n - 1, Math.floor((Math.max(x0, x1, x2) + G.half) * inv));
+        const minZ = Math.max(0, Math.floor((Math.min(z0, z1, z2) + G.half) * inv)), maxZ = Math.min(G.n - 1, Math.floor((Math.max(z0, z1, z2) + G.half) * inv));
+        const sg = Math.sign(area);
+        for (let iz = minZ; iz <= maxZ; iz++) {
+          const cz = (iz + 0.5) * G.size - G.half;
+          for (let ix = minX; ix <= maxX; ix++) {
+            const cx = (ix + 0.5) * G.size - G.half;
+            const e0 = ((x1 - x0) * (cz - z0) - (z1 - z0) * (cx - x0)) * sg;
+            const e1 = ((x2 - x1) * (cz - z1) - (z2 - z1) * (cx - x1)) * sg;
+            const e2 = ((x0 - x2) * (cz - z2) - (z0 - z2) * (cx - x2)) * sg;
+            if (e0 >= -0.01 && e1 >= -0.01 && e2 >= -0.01) cells[iz * G.n + ix] = 1;
+          }
+        }
+      }
+    }
+    G.cells = cells;
+    return true;
+  }
+  const blocked = (x, z) => {
+    if (!G.cells) return false;
+    const ix = Math.floor((x + G.half) / G.size), iz = Math.floor((z + G.half) / G.size);
+    return ix >= 0 && iz >= 0 && ix < G.n && iz < G.n && G.cells[iz * G.n + ix] === 1;
+  };
+
+  // ---------- Фонари и пальмы вдоль улиц ----------
+  function placeProps() {
+    const spots = [];
+    for (const w of net.ways) {
+      if (w.f || Math.hypot(w.p[0], w.p[1]) > SPAWN_RADIUS) continue;
+      let carry = Math.random() * 60;
+      for (let i = 2; i < w.p.length; i += 2) {
+        const x0 = w.p[i - 2], z0 = w.p[i - 1], x1 = w.p[i], z1 = w.p[i + 1], L = Math.hypot(x1 - x0, z1 - z0);
+        if (!L) continue;
+        const fx = (x1 - x0) / L, fz = (z1 - z0) / L;
+        for (let d = carry; d < L; d += 70) {
+          const side = spots.length % 2 ? 1 : -1, x = x0 + fx * d - fz * 9 * side, z = z0 + fz * d + fx * 9 * side;
+          if (!blocked(x, z) && !blocked(x + 1.5, z) && !blocked(x - 1.5, z) && !blocked(x, z + 1.5) && !blocked(x, z - 1.5))
+            spots.push({ x, z, ang: Math.atan2(-fz, fx) + (side > 0 ? 0 : Math.PI) + Math.PI / 2 });
+          carry = d + 70 - L;
+        }
+        if (carry < 0) carry = 0;
+      }
+    }
+    const lampsN = Math.ceil(spots.length / 2), palmsN = spots.length - lampsN;
+    const poles = new THREE.InstancedMesh(lampPoleGeometry(), basic(), lampsN);
+    const heads = new THREE.InstancedMesh(lampHeadGeometry(), basic(), lampsN);
+    const pools = new THREE.InstancedMesh(new THREE.PlaneGeometry(22, 22).rotateX(-Math.PI / 2), additive(0xffffff), lampsN);
+    pools.material.opacity = 0.55;
+    const trunks = new THREE.InstancedMesh(palmTrunkGeometry(), basic(), palmsN);
+    const leaves = new THREE.InstancedMesh(palmLeavesGeometry(), basic(), palmsN);
+    let li = 0, pi = 0;
+    spots.forEach((sp, k) => {
+      o.position.set(sp.x, 0, sp.z);
+      o.rotation.set(0, sp.ang, 0);
+      o.scale.setScalar(k % 2 ? 1 : 0.9 + Math.random() * 0.3);
+      o.updateMatrix();
+      if (k % 2 === 0 && li < lampsN) {
+        poles.setMatrixAt(li, o.matrix);
+        heads.setMatrixAt(li, o.matrix);
+        const col = [NEON.pink, NEON.cyan, NEON.purple][li % 3];
+        heads.setColorAt(li, c.set(col));
+        pools.setColorAt(li, c.set(col));
+        o.position.set(sp.x + Math.cos(sp.ang) * 2.4, 0.18, sp.z - Math.sin(sp.ang) * 2.4);
+        o.updateMatrix();
+        pools.setMatrixAt(li++, o.matrix);
+      } else if (pi < palmsN) {
+        trunks.setMatrixAt(pi, o.matrix);
+        leaves.setMatrixAt(pi++, o.matrix);
+      }
+    });
+    for (const m of [poles, heads, pools, trunks, leaves]) { m.frustumCulled = false; group.add(m); }
+    console.log(`vice: ${lampsN} фонарей, ${palmsN} пальм`);
+  }
+
+  let net = null, agents = [], last = 0, drive = false, propsDone = false, lastShout = 0;
   fetchRoads(config.origin).then(ways => {
     if (!ways || !ways.length) { console.warn('vice: улицы не загрузились, машин не будет'); return; }
     net = buildNetwork(ways);
@@ -442,45 +586,74 @@ export function initVice(scene, config, camera, controls) {
       ...Array.from({ length: N_CARS }, () => spawn(net, true)),
       ...Array.from({ length: N_PEOPLE }, () => spawn(net, false)),
     ];
-    cars.count = glow.count = N_CARS;
-    people.count = N_PEOPLE;
+    cars.count = lights.count = glow.count = N_CARS;
+    shirts.count = bodies.count = N_PEOPLE;
     console.log(`vice: ${ways.length} улиц, ${N_CARS} машин, ${N_PEOPLE} пешеходов`);
   });
+  const SHOUTS = ['Эй! Тут вообще-то тротуар!', 'Права купил, что ли?!', 'Масло своё вези аккуратнее!', 'Я в «Кружево FM» позвоню!', 'Совсем уже, 1147 год на дворе!'];
 
   const o = new THREE.Object3D();
   function update(now) {
     const t = now / 1000, dt = Math.min(0.1, last ? t - last : 0);
     last = t;
     if (!net) return;
+    if (!propsDone && document.getElementById('loading')?.hidden) { propsDone = true; buildGrid(); placeProps(); }
     if (game.driving) driveStep(dt, t);
-    const boost = drive ? 3 : 1;
+    const boost = drive ? 3 : 1, px = pos.x, pz = pos.y, pspeed = game.driving ? vel.length() : 0;
     for (let k = 0; k < agents.length; k++) {
       const a = agents[k];
-      const p = advance(net, a, a.speed * dt * (a.car ? boost : 1));
+      if (a.stun > 0) a.stun -= dt;
+      const p = advance(net, a, a.stun > 0 ? 0 : a.speed * dt * (a.car ? boost : 1));
       if (a.car) {
+        a.x = p.x; a.z = p.z;
         o.position.set(p.x, 0, p.z);
         o.rotation.set(0, p.ang, 0);
         o.scale.setScalar(1);
         o.updateMatrix();
         cars.setMatrixAt(k, o.matrix);
+        lights.setMatrixAt(k, o.matrix);
         o.position.y = 0.25;
         o.scale.setScalar(drive ? 1.7 : 1);
         o.updateMatrix();
         glow.setMatrixAt(k, o.matrix);
       } else {
-        o.position.set(p.x, Math.abs(Math.sin(t * 7 + a.phase)) * 0.35, p.z);
-        o.rotation.set(0, p.ang, 0);
+        let x = p.x, z = p.z;
+        // Не заходить в дома: на узкой улице пешеход прижимается к проезжей части.
+        if (blocked(x, z)) { x += p.fz * a.off * 0.7; z -= p.fx * a.off * 0.7; }
+        // Отпрыгнуть от машины игрока.
+        if (pspeed > 2 && !(a.jump > 0)) {
+          const dx = x + (a.ex || 0) - px, dz = z + (a.ez || 0) - pz, d2 = dx * dx + dz * dz;
+          if (d2 < 100) {
+            const d = Math.sqrt(d2) || 1;
+            a.jump = 0.7; a.vx = dx / d * (8 + pspeed * 0.3); a.vz = dz / d * (8 + pspeed * 0.3);
+            if (t - lastShout > 6 && Math.random() < 0.35) { lastShout = t; subtitle(`Пешеход: «${SHOUTS[Math.floor(Math.random() * SHOUTS.length)]}»`); }
+          }
+        }
+        let y = Math.abs(Math.sin(t * 7 + a.phase)) * 0.25;
+        if (a.jump > 0) {
+          a.jump -= dt;
+          a.ex = (a.ex || 0) + a.vx * dt; a.ez = (a.ez || 0) + a.vz * dt;
+          y = Math.sin((1 - a.jump / 0.7) * Math.PI) * 2.6;
+        } else if (a.ex) {
+          a.ex *= Math.exp(-0.4 * dt); a.ez *= Math.exp(-0.4 * dt);
+          if (Math.abs(a.ex) + Math.abs(a.ez) < 0.05) a.ex = a.ez = 0;
+        }
+        o.position.set(x + (a.ex || 0), y, z + (a.ez || 0));
+        o.rotation.set(0, p.ang + (a.jump > 0 ? (1 - a.jump / 0.7) * 6.28 : 0), 0);
         o.scale.setScalar(1);
         o.updateMatrix();
-        people.setMatrixAt(k - N_CARS, o.matrix);
+        shirts.setMatrixAt(k - N_CARS, o.matrix);
+        bodies.setMatrixAt(k - N_CARS, o.matrix);
       }
     }
-    cars.instanceMatrix.needsUpdate = glow.instanceMatrix.needsUpdate = people.instanceMatrix.needsUpdate = true;
+    for (const m of [cars, lights, glow, shirts, bodies]) m.instanceMatrix.needsUpdate = true;
   }
 
   // ---------- Своя машина и задание «Масло в Кремль» ----------
   const game = { driving: false };
   const player = new THREE.Mesh(carGeometry(), new THREE.MeshBasicMaterial({ vertexColors: true, color: NEON.pink }));
+  const playerLights = new THREE.Mesh(carLightsGeometry(), new THREE.MeshBasicMaterial({ vertexColors: true }));
+  player.add(playerLights);
   const pglow = new THREE.Mesh(new THREE.PlaneGeometry(20, 11).rotateX(-Math.PI / 2),
     new THREE.MeshBasicMaterial({ map: glow.material.map, color: NEON.cyan, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
   pglow.position.y = 0.3;
@@ -495,7 +668,22 @@ export function initVice(scene, config, camera, controls) {
 
   const keys = new Set();
   const pos = new THREE.Vector2(), vel = new THREE.Vector2();
-  let ang = 0, money = 0, mission = null;
+  let ang = 0, money = 0, mission = null, shake = 0, lastBump = 0;
+  // Углы машины игрока (длина ~11 м, ширина ~4,8 м) плюс середины бортов.
+  const PROBES = [[5.2, 2.1], [5.2, -2.1], [-5.2, 2.1], [-5.2, -2.1], [0, 2.2], [0, -2.2], [5.4, 0]];
+  function hits(x, z, a) {
+    const fx = Math.cos(a), fz = -Math.sin(a);
+    for (const [l, w] of PROBES) if (blocked(x + fx * l - fz * w, z + fz * l + fx * w)) return true;
+    return false;
+  }
+  function bump(speed) {
+    shake = Math.min(2.5, Math.max(shake, speed * 0.12));
+    const now = performance.now();
+    if (speed > 8 && now - lastBump > 1500) {
+      lastBump = now;
+      subtitle(['Бам!', 'Хрясь!', 'Ой, бампер…', 'Страховка «Вологда-Авто» уже едет.'][Math.floor(Math.random() * 4)]);
+    }
+  }
   const hud = document.createElement('div');
   hud.className = 'game-hud';
   hud.innerHTML = `<div class="g-money">₽ 0</div><div class="g-timer"></div><div class="g-goal"><i class="g-arrow">➤</i><span></span></div>
@@ -543,6 +731,7 @@ export function initVice(scene, config, camera, controls) {
     controls.enabled = !game.driving;
     btn.textContent = game.driving ? 'Выйти из машины (F)' : 'Сесть за руль (F)';
     if (game.driving) {
+      if (!G.cells) buildGrid();
       const v = nearestVertex(controls.target.x, controls.target.z, w => !w.f);
       const w = v.w, j = Math.min(v.i + 1, w.p.length / 2 - 1), i = j - 1;
       pos.set(w.p[2 * i], w.p[2 * i + 1]);
@@ -572,11 +761,32 @@ export function initVice(scene, config, camera, controls) {
     vf *= Math.exp(-(up || down ? 0.15 : 0.7) * dt);
     if (hand) vf *= Math.exp(-1.1 * dt);
     const steer = (left ? 1 : 0) - (right ? 1 : 0);
+    const prevAng = ang, stuck = hits(pos.x, pos.y, ang);
     ang += steer * (hand ? 3.2 : 2.1) * dt * Math.max(-1, Math.min(1, vf / 10));
+    if (!stuck && hits(pos.x, pos.y, ang)) ang = prevAng; // не поворачивать «в стену»
     vl *= Math.exp(-(hand ? 1.2 : 9) * dt);
     const nfx = Math.cos(ang), nfz = -Math.sin(ang);
     vel.set(nfx * vf + -nfz * vl, nfz * vf + nfx * vl);
-    pos.addScaledVector(vel, dt);
+    // Дома: двигаемся по осям отдельно, чтобы скользить вдоль стены; лоб в стену — отскок.
+    const nx = pos.x + vel.x * dt, nz = pos.y + vel.y * dt;
+    if (stuck || !hits(nx, nz, ang)) pos.set(nx, nz);
+    else {
+      const sp = vel.length();
+      if (!hits(nx, pos.y, ang)) { pos.x = nx; vel.y *= -0.25; vel.x *= 0.7; }
+      else if (!hits(pos.x, nz, ang)) { pos.y = nz; vel.x *= -0.25; vel.y *= 0.7; }
+      else vel.multiplyScalar(-0.3);
+      bump(sp);
+    }
+    // Другие машины: расталкиваемся, встречная машина замирает на пару секунд.
+    for (const a of agents) {
+      if (!a.car || a.x === undefined) continue;
+      const dx = pos.x - a.x, dz = pos.y - a.z, d2 = dx * dx + dz * dz;
+      if (d2 > 64) continue;
+      const d = Math.sqrt(d2) || 1, ux = dx / d, uz = dz / d, vn = vel.x * ux + vel.y * uz;
+      if (vn < 0) { vel.x -= 1.5 * vn * ux; vel.y -= 1.5 * vn * uz; bump(-vn); }
+      if (!hits(pos.x + ux * (8 - d), pos.y + uz * (8 - d), ang)) { pos.x += ux * (8 - d); pos.y += uz * (8 - d); }
+      if (vel.length() > 2) a.stun = 1.2;
+    }
     player.position.set(pos.x, 0, pos.y);
     player.rotation.set(0, ang, 0);
     pglow.position.set(pos.x, 0.3, pos.y);
@@ -588,6 +798,9 @@ export function initVice(scene, config, camera, controls) {
     camera.position.x += (pos.x - nfx * back - camera.position.x) * k;
     camera.position.y += (14 + Math.abs(vf) * 0.12 - camera.position.y) * k;
     camera.position.z += (pos.y - nfz * back - camera.position.z) * k;
+    shake *= Math.exp(-6 * dt);
+    camera.position.x += (Math.random() - 0.5) * shake;
+    camera.position.y += (Math.random() - 0.5) * shake;
     camera.lookAt(pos.x + nfx * 14, 2, pos.y + nfz * 14);
     controls.target.set(pos.x, 0, pos.y);
 

@@ -172,7 +172,7 @@ initBasemap(flat, config).then(g => {
 });
 
 // Машины, пешеходы, закатное небо и пасхалка (vice.js).
-const vice = initVice(scene, config, camera, controls);
+const vice = initVice(scene, config, camera, controls, () => meshes);
 
 // ---------- Street and canal names ----------
 // Flat on the ground, turned along the street (pipeline/s07_labels.py). Textures are drawn on first use.
@@ -408,6 +408,18 @@ const FRAG = /* glsl */`
       float foot = mix(0.82, 1.0, clamp(vWorld.y / 12.0, 0.0, 1.0));
       vec3 c = vColor * light * foot;
       float d = length(vWorld - cameraPosition);
+      // Ночные окна: сетка по стенам, часть горит тёплым светом, редкие — неоном.
+      float wnear = 1.0 - smoothstep(500.0, 1400.0, d);
+      if (abs(n.y) < 0.3 && vWorld.y > 1.2 && wnear > 0.0) {
+        vec2 t = normalize(vec2(-n.z, n.x));
+        float u = dot(vWorld.xz, t) / 3.4, v = vWorld.y / 3.1;
+        float fu = fract(u), fv = fract(v);
+        float win = step(0.26, fu) * step(fu, 0.74) * step(0.32, fv) * step(fv, 0.8);
+        float h = fract(sin(dot(floor(vec2(u, v)) + vGid * 0.731, vec2(127.1, 311.7))) * 43758.5453);
+        vec3 lit = h > 0.94 ? vec3(1.0, 0.3, 0.7) : h > 0.88 ? vec3(0.35, 0.95, 1.0) : vec3(1.0, 0.8, 0.5);
+        vec3 glass = mix(vec3(0.07, 0.04, 0.13), lit, step(0.5, h));
+        c = mix(c, mix(c * 0.72, glass, win), wnear);
+      }
       c = mix(c, uFogColor, smoothstep(uFog.x, uFog.y, d));
       outColor = vec4(c, 1.0);
     #endif
