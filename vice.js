@@ -22,7 +22,7 @@ const CAR_SCALE = 2.4;      // машины и люди крупнее наст�
 const PERSON_SCALE = 1.9;
 const SPAWN_RADIUS = 2600;  // м от центра: здесь машины и люди появляются, дальше просто уезжают
 
-const CACHE_KEY = 'vologda-vice-roads-v4';
+const CACHE_KEY = 'vologda-vice-roads-v5';
 const STYLE_URL = `https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json?key=${CARTO_KEY}`;
 const ROAD_ZOOM = 14;
 const SNAP = 2; // м: вершины ближе этого считаются одним перекрёстком
@@ -287,7 +287,7 @@ async function fetchRoads(origin) {
   const jobs = [];
   for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) jobs.push([x, y]);
 
-  const ways = [], water = [], shops = new Map();
+  const ways = [], water = [], rivers = [], shops = new Map();
   await Promise.all(jobs.map(async ([x, y]) => {
     let layers;
     try {
@@ -304,6 +304,18 @@ async function fetchRoads(origin) {
     // Вода: полигоны; рёбра по краю тайла (обрезка) — не берег, набережную на них не строим.
     const W = layers.find(l => l.name === 'water');
     for (const F of W ? W.features : []) {
+      if (F.type === 2) { // реки и каналы приходят линиями: русло строим лентой нужной ширины
+        const kind = tagsOf(W, F).kind;
+        const width = kind === 'river' ? 88 : kind === 'canal' ? 14 : kind === 'stream' ? 7 : 0;
+        if (!width) continue;
+        for (const ln of lines(F.geom)) {
+          if (ln.length < 4) continue;
+          const p = [];
+          for (let i = 0; i < ln.length; i += 2) p.push(...toLocal(W, ln[i], ln[i + 1]));
+          rivers.push({ p, w: width });
+        }
+        continue;
+      }
       if (F.type !== 3) continue;
       let poly = null;
       for (const ring of lines(F.geom)) {
@@ -357,7 +369,7 @@ async function fetchRoads(origin) {
     }
   }));
   if (!ways.length) return null;
-  const data = { ways, water, shops: [...shops.values()] };
+  const data = { ways, water, rivers, shops: [...shops.values()] };
   try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch { /* слишком большой кэш — не страшно */ }
   return data;
 }
@@ -649,7 +661,7 @@ function waterGeometry(polys, H) {
   g.setIndex(idx);
   return g;
 }
-function embankmentGeometry(polys, H) {
+function embankmentGeometry(polys, H, rivers = [], nearRoad = () => false) {
   const pos = [], col = [], idx = [];
   const quad = (a, b, c2, d, rgb) => {
     const i = pos.length / 3;
@@ -657,11 +669,43 @@ function embankmentGeometry(polys, H) {
     for (let k = 0; k < 4; k++) col.push(...rgb);
     idx.push(i, i + 1, i + 2, i, i + 2, i + 3);
   };
+  // Русло в OSM часто разбито на несколько полигонов: общие рёбра — это стыки, а не берег.
+  const key = (ax, az, bx, bz) => { const a = `${Math.round(ax)},${Math.round(az)}`, b = `${Math.round(bx)},${Math.round(bz)}`; return a < b ? a + '|' + b : b + '|' + a; };
+  const seen = new Map();
+  for (const P of polys) for (let k = 0; k < P.edges.length; k += 4) { const kk = key(P.edges[k], P.edges[k + 1], P.edges[k + 2], P.edges[k + 3]); seen.set(kk, (seen.get(kk) || 0) + 1); }
+  // Маска воды (клетка 4 м, чётно-нечётная заливка): ребро, у которого вода с обеих сторон, — стык, а не берег.
+  const C = 4, HALF = 4800, N = Math.ceil(2 * HALF / C), mask = new Uint8Array(N * N);
+  for (const P of polys) {
+    const rings = [P.outer, ...P.holes];
+    if (!P.outer.length) continue;
+    let z0 = Infinity, z1 = -Infinity;
+    for (let i = 1; i < P.outer.length; i += 2) { z0 = Math.min(z0, P.outer[i]); z1 = Math.max(z1, P.outer[i]); }
+    for (let iz = Math.max(0, Math.floor((z0 + HALF) / C)); iz <= Math.min(N - 1, Math.floor((z1 + HALF) / C)); iz++) {
+      const z = (iz + 0.5) * C - HALF, xs = [];
+      for (const r of rings) for (let i = 0, j = r.length - 2; i < r.length; j = i, i += 2)
+        if ((r[i + 1] > z) !== (r[j + 1] > z)) xs.push(r[i] + (z - r[i + 1]) * (r[j] - r[i]) / (r[j + 1] - r[i + 1]));
+      xs.sort((a, b) => a - b);
+      for (let k = 0; k + 1 < xs.length; k += 2)
+        for (let ix = Math.max(0, Math.ceil((xs[k] + HALF) / C - 0.5)); ix <= Math.min(N - 1, Math.floor((xs[k + 1] + HALF) / C - 0.5)); ix++) mask[iz * N + ix] = 1;
+    }
+  }
+  for (const R of rivers) { // русла тоже вода: стык пруда и реки — не берег
+    const c = densify(R.p, C);
+    for (let i = 0; i < c.length; i += 2) for (let dx = -R.w / 2; dx <= R.w / 2; dx += C) for (let dz = -R.w / 2; dz <= R.w / 2; dz += C) {
+      if (dx * dx + dz * dz > R.w * R.w / 4) continue;
+      const ix = Math.floor((c[i] + dx + HALF) / C), iz = Math.floor((c[i + 1] + dz + HALF) / C);
+      if (ix >= 0 && iz >= 0 && ix < N && iz < N) mask[iz * N + ix] = 1;
+    }
+  }
+  const wet = (x, z) => { const ix = Math.floor((x + HALF) / C), iz = Math.floor((z + HALF) / C); return ix >= 0 && iz >= 0 && ix < N && iz < N && mask[iz * N + ix] === 1; };
   for (const P of polys) {
     const e = P.edges;
     for (let k = 0; k < e.length; k += 4) {
       const ax = e[k], az = e[k + 1], bx = e[k + 2], bz = e[k + 3], L = Math.hypot(bx - ax, bz - az);
-      if (L < 0.5) continue;
+      if (L < 0.5 || seen.get(key(ax, az, bx, bz)) > 1) continue;
+      const mx = (ax + bx) / 2, mz = (az + bz) / 2, nx0 = -(bz - az) / L * 6, nz0 = (bx - ax) / L * 6;
+      if (wet(mx + nx0, mz + nz0) && wet(mx - nx0, mz - nz0)) continue;
+      if (nearRoad(mx, mz)) continue; // мост: стенку не ставим поперёк дороги
       const parts = Math.ceil(L / 15), nx = -(bz - az) / L, nz = (bx - ax) / L;
       const shade = 0.75 + 0.25 * Math.abs(nx * 0.6 + nz * 0.8);
       const granite = [0.42 * shade, 0.36 * shade, 0.5 * shade], cap = [0.62, 0.56, 0.7];
@@ -683,14 +727,71 @@ function embankmentGeometry(polys, H) {
   g.setIndex(idx);
   return g;
 }
+// Русло по линии реки: смещаем полилинию на ±w/2 по усреднённым нормалям (без щелей на изгибах).
+function offsetLine(p, d) {
+  const out = [], n = p.length / 2;
+  for (let i = 0; i < n; i++) {
+    const a = Math.max(0, i - 1), b = Math.min(n - 1, i + 1);
+    let fx = p[2 * b] - p[2 * a], fz = p[2 * b + 1] - p[2 * a + 1];
+    const L = Math.hypot(fx, fz) || 1; fx /= L; fz /= L;
+    out.push(p[2 * i] - fz * d, p[2 * i + 1] + fx * d);
+  }
+  return out;
+}
+function densify(p, step) {
+  const out = [p[0], p[1]];
+  for (let i = 2; i < p.length; i += 2) {
+    const ax = p[i - 2], az = p[i - 1], bx = p[i], bz = p[i + 1], k = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / step));
+    for (let j = 1; j <= k; j++) out.push(ax + (bx - ax) * j / k, az + (bz - az) * j / k);
+  }
+  return out;
+}
+function mergeGeoms(gs) {
+  const pos = [], idx = [];
+  for (const g of gs) {
+    const base = pos.length / 3;
+    for (const v of g.attributes.position.array) pos.push(v);
+    for (const i of g.index ? g.index.array : []) idx.push(base + i);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  return g;
+}
+function riverWaterGeometry(rivers, H) {
+  const pos = [], idx = [];
+  for (const R of rivers) {
+    const c = densify(R.p, 20), l = offsetLine(c, R.w / 2), r = offsetLine(c, -R.w / 2);
+    const base = pos.length / 3, n = c.length / 2;
+    for (let i = 0; i < n; i++) {
+      pos.push(l[2 * i], H(c[2 * i], c[2 * i + 1]) - 1.2, l[2 * i + 1], r[2 * i], H(c[2 * i], c[2 * i + 1]) - 1.2, r[2 * i + 1]);
+      if (i) { const k = base + 2 * i; idx.push(k - 2, k - 1, k, k - 1, k + 1, k); }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  return g;
+}
+// Берега рек как рёбра для набережной (в том же формате, что у прудов); стыки с мостами вырезаются по дорогам.
+function riverBanks(rivers) {
+  return rivers.map(R => {
+    const c = densify(R.p, 15), edges = [];
+    for (const side of [R.w / 2, -R.w / 2]) {
+      const o = offsetLine(c, side);
+      for (let i = 2; i < o.length; i += 2) edges.push(o[i - 2], o[i - 1], o[i], o[i + 1]);
+    }
+    return { outer: [], holes: [], edges };
+  });
+}
+
 // Рябь с неоновыми бликами по воде.
 function waterShader(sh) {
   sh.vertexShader = 'varying vec3 vP;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vP = position;');
   sh.fragmentShader = 'varying vec3 vP;\nuniform float uT;\n' + sh.fragmentShader.replace(/}\s*$/, `
   float w1 = sin(vP.x * 0.09 + uT * 0.9) * sin(vP.z * 0.13 - uT * 0.7);
-  float w2 = sin((vP.x + vP.z) * 0.21 - uT * 1.4);
-  float g = smoothstep(0.86, 1.0, w1) + smoothstep(0.93, 1.0, w2) * 0.6;
-  gl_FragColor.rgb += mix(vec3(1.0, 0.2, 0.6), vec3(0.2, 0.95, 1.0), step(0.0, w2)) * g * 0.55;
+  float w3 = sin(vP.x * 0.05 - uT * 0.5) * sin(vP.z * 0.07 + uT * 0.6);
+  gl_FragColor.rgb += vec3(1.0, 0.2, 0.6) * smoothstep(0.86, 1.0, w1) * 0.45 + vec3(0.2, 0.95, 1.0) * smoothstep(0.9, 1.0, w3) * 0.35;
 }`);
   sh.uniforms.uT = sh.uniforms.uT || { value: 0 };
 }
@@ -907,13 +1008,18 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
       const roads = new THREE.Mesh(roadGeometry(ways, H), new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
       roads.renderOrder = -1;
       group.add(roads);
-      const wg = waterGeometry(data.water || [], H);
+      const rivers = data.rivers || [];
+      // Хэш точек дорог (клетка 12 м), чтобы прервать набережную на мостах.
+      const roadCells = new Set();
+      for (const w of ways) if (!w.f) { const d = densify(w.p, 6); for (let i = 0; i < d.length; i += 2) roadCells.add(`${Math.floor(d[i] / 12)},${Math.floor(d[i + 1] / 12)}`); }
+      const nearRoad = (x, z) => roadCells.has(`${Math.floor(x / 12)},${Math.floor(z / 12)}`);
+      const wg = mergeGeoms([waterGeometry(data.water || [], H), riverWaterGeometry(rivers, H)]);
       waterMat = new THREE.MeshBasicMaterial({ color: '#1b3f9a', side: THREE.DoubleSide, depthWrite: false });
       waterMat.onBeforeCompile = sh => { sh.uniforms.uT = { value: 0 }; waterMat.userData.shader = sh; waterShader(sh); };
       const waterMesh = new THREE.Mesh(wg, waterMat);
       waterMesh.renderOrder = -2;
-      group.add(waterMesh, new THREE.Mesh(embankmentGeometry(data.water || [], H), basic()));
-      console.log(`vice: ${(data.water || []).length} водоёмов, ${shopData.length} магазинов`);
+      group.add(waterMesh, new THREE.Mesh(embankmentGeometry([...(data.water || []), ...riverBanks(rivers)], H, rivers, nearRoad), basic()));
+      console.log(`vice: ${(data.water || []).length} водоёмов, ${rivers.length} русел, ${shopData.length} магазинов`);
     });
     console.log(`vice: ${ways.length} улиц, ${N_CARS} машин, ${N_PEOPLE} пешеходов`);
   });
