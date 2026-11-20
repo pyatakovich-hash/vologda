@@ -172,7 +172,7 @@ initBasemap(flat, config).then(g => {
 });
 
 // Машины, пешеходы, закатное небо и пасхалка (vice.js).
-const vice = initVice(scene, config, camera, controls, () => meshes);
+const vice = initVice(scene, config, camera, controls, () => meshes, gid => building(gid));
 
 // ---------- Street and canal names ----------
 // Flat on the ground, turned along the street (pipeline/s07_labels.py). Textures are drawn on first use.
@@ -310,6 +310,7 @@ const VERT = /* glsl */`
   uniform float uPickOn;
   out vec3 vColor;
   out vec3 vWorld;
+  out float vKind; // 1 — храм, 2 — деревянный дом, 3 — известное здание (есть статья)
   out float vGid;
 
   vec3 floorsRamp(float f) {
@@ -384,6 +385,7 @@ const VERT = /* glsl */`
     vColor = c;
     vec4 w = modelMatrix * vec4(p, 1.0);
     vWorld = w.xyz;
+    vKind = hasBit(lay, 10) ? 1.0 : hasBit(lay, 6) ? 2.0 : hasBit(lay, 13) ? 3.0 : 0.0;
     gl_Position = projectionMatrix * viewMatrix * w;
   }
 `;
@@ -395,6 +397,7 @@ const FRAG = /* glsl */`
   in vec3 vColor;
   in vec3 vWorld;
   in float vGid;
+  in float vKind;
   out vec4 outColor;
   void main() {
     #ifdef PICK
@@ -410,7 +413,43 @@ const FRAG = /* glsl */`
       float d = length(vWorld - cameraPosition);
       // Ночные окна: сетка по стенам, часть горит тёплым светом, редкие — неоном.
       float wnear = 1.0 - smoothstep(500.0, 1400.0, d);
-      if (abs(n.y) < 0.3 && vWorld.y > 1.2 && wnear > 0.0) {
+      // Известные здания: своя фактура стен и кровли (вблизи; издалека остаётся цвет эпохи).
+      if (vKind > 0.5 && wnear > 0.0) {
+        vec2 t = normalize(vec2(-n.z, n.x));
+        float u = dot(vWorld.xz, t), y = vWorld.y;
+        if (abs(n.y) < 0.3) {
+          vec3 base;
+          if (vKind < 1.5) {                // храм: белёные стены и лопатки
+            base = vec3(0.95, 0.92, 0.86) - step(0.88, fract(u / 4.2)) * 0.13;
+          } else if (vKind < 2.5) {         // деревянный дом: брёвна
+            float lg = fract(y / 0.34);
+            base = mix(vec3(0.38, 0.23, 0.14), vec3(0.64, 0.43, 0.26), smoothstep(0.05, 0.45, lg) * (1.0 - smoothstep(0.7, 1.0, lg)));
+          } else {                          // кирпич с белокаменными поясами
+            float row = floor(y / 0.3);
+            float bu = fract(u / 0.62 + 0.5 * mod(row, 2.0));
+            float mortar = max(step(0.86, fract(y / 0.3)), step(0.93, bu));
+            float tone = fract(sin(dot(vec2(floor(u / 0.62 + 0.5 * mod(row, 2.0)), row), vec2(12.9898, 78.233))) * 43758.5453);
+            base = mix(vec3(0.6, 0.22, 0.15) * (0.85 + 0.3 * tone), vec3(0.86, 0.81, 0.74), mortar);
+          }
+          float band = step(0.92, fract(y / 3.1)) * step(2.0, y);
+          base = mix(base, vec3(0.97, 0.95, 0.9), band * (vKind > 1.5 && vKind < 2.5 ? 0.0 : 0.9));
+          base = mix(base, base * 0.75, step(y, 1.0));              // цоколь
+          // Арочные окна в белых наличниках.
+          vec2 q = vec2((fract(u / 3.4) - 0.5) * 3.4, (fract(y / 3.1) - 0.62) * 3.1);
+          float win = max(step(abs(q.x), 0.42) * step(-1.05, q.y) * step(q.y, 0.0), step(length(q), 0.42) * step(0.0, q.y));
+          float frm = max(step(abs(q.x), 0.6) * step(-1.22, q.y) * step(q.y, 0.0), step(length(q), 0.6) * step(0.0, q.y)) * (1.0 - win);
+          float hh = fract(sin(dot(floor(vec2(u / 3.4, y / 3.1)) + vGid * 0.731, vec2(127.1, 311.7))) * 43758.5453);
+          vec3 glass = mix(vec3(0.08, 0.05, 0.14), vec3(1.0, 0.8, 0.48), step(0.4, hh));
+          vec3 fac = mix(base, vec3(1.0, 0.97, 0.9), frm * step(1.2, y));
+          fac = mix(fac, glass, win * step(1.2, y));
+          fac = mix(fac, vColor, 0.16);                             // лёгкий оттенок эпохи
+          c = mix(c, fac * (0.62 + 0.38 * sun) * foot, wnear);
+        } else if (n.y > 0.9) {             // кровля с фальцами
+          float seam = step(0.86, fract((vWorld.x + vWorld.z) / 1.8));
+          vec3 roof = vKind < 1.5 ? vec3(0.22, 0.52, 0.42) : vKind < 2.5 ? vec3(0.36, 0.31, 0.3) : vec3(0.32, 0.48, 0.42);
+          c = mix(c, mix(mix(roof, roof * 1.45, seam), vColor, 0.18), wnear);
+        }
+      } else if (abs(n.y) < 0.3 && vWorld.y > 1.2 && wnear > 0.0) {
         vec2 t = normalize(vec2(-n.z, n.x));
         float u = dot(vWorld.xz, t) / 3.4, v = vWorld.y / 3.1;
         float fu = fract(u), fv = fract(v);

@@ -22,7 +22,7 @@ const CAR_SCALE = 2.4;      // машины и люди крупнее наст�
 const PERSON_SCALE = 1.9;
 const SPAWN_RADIUS = 2600;  // м от центра: здесь машины и люди появляются, дальше просто уезжают
 
-const CACHE_KEY = 'vologda-vice-roads-v2';
+const CACHE_KEY = 'vologda-vice-roads-v3';
 const STYLE_URL = `https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json?key=${CARTO_KEY}`;
 const ROAD_ZOOM = 14;
 const SNAP = 2; // м: вершины ближе этого считаются одним перекрёстком
@@ -267,7 +267,7 @@ async function fetchRoads(origin) {
           p.push(px, pz);
           ids.push(`${Math.round(px / SNAP)},${Math.round(pz / SNAP)}`);
         }
-        ways.push({ p, n: ids, f: car ? 0 : 1 });
+        ways.push({ p, n: ids, f: car ? 0 : 1, k: !car ? 0 : kind === 'minor_road' ? 1 : 2 });
       }
     }
   }));
@@ -459,12 +459,91 @@ function toast(html) {
   setTimeout(() => el.remove(), 7500);
 }
 
+// ---------- Дороги: асфальт, неоновые бровки, прерывистая осевая ----------
+function roadGeometry(ways) {
+  const pos = [], col = [], idx = [];
+  const quad = (ax, az, bx, bz, half, y, rgb, ext = 0) => {
+    const L = Math.hypot(bx - ax, bz - az);
+    if (L < 0.01) return;
+    const fx = (bx - ax) / L, fz = (bz - az) / L, rx = -fz * half, rz = fx * half;
+    const sx = ax - fx * ext, sz = az - fz * ext, ex = bx + fx * ext, ez = bz + fz * ext;
+    const i = pos.length / 3;
+    pos.push(sx + rx, y, sz + rz, sx - rx, y, sz - rz, ex - rx, y, ez - rz, ex + rx, y, ez + rz);
+    for (let k = 0; k < 4; k++) col.push(...rgb);
+    idx.push(i, i + 2, i + 1, i, i + 3, i + 2);
+  };
+  const ASPHALT = [0.17, 0.12, 0.26], WALK = [0.3, 0.17, 0.34];
+  const EDGE = [[0.12, 0.9, 1.0], [1.0, 0.18, 0.58]], DASH = [1.0, 0.89, 0.36];
+  for (const w of ways) {
+    const width = w.k === 2 ? 15 : w.k === 1 ? 8.5 : 2.6;
+    for (let i = 2; i < w.p.length; i += 2) {
+      const ax = w.p[i - 2], az = w.p[i - 1], bx = w.p[i], bz = w.p[i + 1];
+      quad(ax, az, bx, bz, width / 2, w.k ? 0.04 : 0.03, w.k ? ASPHALT : WALK, width / 2);
+      if (!w.k) continue;
+      const L = Math.hypot(bx - ax, bz - az), fx = (bx - ax) / L, fz = (bz - az) / L, rx = -fz, rz = fx;
+      const off = width / 2 - 0.6, edge = EDGE[w.k === 2 ? 0 : 1];
+      quad(ax + rx * off, az + rz * off, bx + rx * off, bz + rz * off, 0.4, 0.07, edge);
+      quad(ax - rx * off, az - rz * off, bx - rx * off, bz - rz * off, 0.4, 0.07, edge);
+      if (w.k === 2) for (let d = 1; d + 3 < L; d += 9) quad(ax + fx * d, az + fz * d, ax + fx * (d + 4), az + fz * (d + 4), 0.3, 0.08, DASH);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setIndex(idx);
+  return g;
+}
+
+// ---------- Купол-луковица с барабаном и крестом ----------
+function shadeByNormal(g, rgb, tone = 1) {
+  g = g.index ? g.toNonIndexed() : g;
+  g.computeVertexNormals();
+  const n = g.attributes.normal, colors = new Float32Array(n.count * 3);
+  for (let i = 0; i < n.count; i++) {
+    const k = tone * (0.55 + 0.45 * Math.max(0, n.getY(i) * 0.6 + n.getX(i) * 0.5 + 0.3));
+    colors.set([k * rgb[0], k * rgb[1], k * rgb[2]], i * 3);
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  g.deleteAttribute('uv');
+  return g;
+}
+function domeGeometry() {
+  const onion = [[0, 0], [0.56, 0], [0.66, 0.18], [0.8, 0.5], [0.82, 0.78], [0.68, 1.08], [0.42, 1.36], [0.18, 1.6], [0.06, 1.85], [0, 2.0]]
+    .map(([x, y]) => new THREE.Vector2(x, y));
+  const drum = shadeByNormal(new THREE.CylinderGeometry(0.55, 0.6, 1.1, 16).translate(0, 0.55, 0), [0.95, 0.93, 0.88]);
+  const dome = shadeByNormal(new THREE.LatheGeometry(onion, 20).translate(0, 1.1, 0), [1.0, 0.78, 0.28], 1.15);
+  const cross = merge([
+    shadedBox(0.06, 0.9, 0.06, 0, 3.5, 0, 1.2, [1, 0.85, 0.4]),
+    shadedBox(0.42, 0.06, 0.06, 0, 3.65, 0, 1.2, [1, 0.85, 0.4]),
+  ]);
+  return merge([drum, dome, cross]);
+}
+
+// ---------- Неоновые вывески на крышах ----------
+const SIGNS = ['МАСЛО', 'КРУЖЕВО', '1147', 'ВОЛОГДА', 'ДИСКО', 'ВИДЕОПРОКАТ', 'ТАКСИ', 'КИНО', 'ОТЕЛЬ «ЗАКАТ»', 'БАР «ПРИСТАНЬ»', 'КАФЕ «ЛЁН»', 'КАССЕТЫ', 'ПЕЛЬМЕНИ', 'ГАЛАНТЕРЕЯ'];
+function signTexture(text, color) {
+  const c = document.createElement('canvas');
+  c.width = 1024; c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.font = '400 150px Lobster, cursive';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.shadowColor = color; ctx.shadowBlur = 40;
+  ctx.fillStyle = color;
+  ctx.fillText(text, 512, 132, 980);
+  ctx.shadowBlur = 0; ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.85;
+  ctx.fillText(text, 512, 132, 980);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
 // ---------- Сборка ----------
 export function tintBasemap(group) {
   group?.traverse(m => m.material?.color?.setRGB(2.6, 1.4, 3.6));
 }
 
-export function initVice(scene, config, camera, controls, getMeshes = () => []) {
+export function initVice(scene, config, camera, controls, getMeshes = () => [], getBuilding = () => null) {
   const sky = { dusk: gradientTexture(SKY_DUSK), drive: gradientTexture(SKY_NIGHT_DRIVE) };
   scene.background = sky.dusk;
 
@@ -578,6 +657,43 @@ export function initVice(scene, config, camera, controls, getMeshes = () => []) 
     console.log(`vice: ${lampsN} фонарей, ${palmsN} пальм`);
   }
 
+  // ---------- Купола на храмах и вывески на высоких домах (по названиям из поиска) ----------
+  async function placeLandmarks() {
+    let names = [];
+    try { names = (await fetch('data/search.json').then(r => r.json())).names || []; } catch { return; }
+    const domes = [], signs = [];
+    for (const [name, , x, z, , gid] of names) {
+      if (!(gid >= 0) || Math.hypot(x, z) > SPAWN_RADIUS) continue;
+      let b;
+      try { b = getBuilding(gid); } catch { continue; }
+      if (!b || !b.height) continue;
+      const church = (b.groups || []).some(g => g.bit === 10) || /собор|церк|храм|часовн/i.test(name);
+      if (church) {
+        const R = Math.max(3.2, Math.min(8, b.height * 0.3));
+        domes.push([x, b.height, z, R]);
+        if (/собор/i.test(name)) for (const [dx, dz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) domes.push([x + dx * R * 2.2, b.height, z + dz * R * 2.2, R * 0.55]);
+      } else if (b.height >= 15 && Math.hypot(x, z) < 2400 && signs.every(([sx, , sz]) => Math.hypot(sx - x, sz - z) > 220)) {
+        signs.push([x, b.height, z]);
+      }
+    }
+    if (domes.length) {
+      const dm = new THREE.InstancedMesh(domeGeometry(), basic(), domes.length);
+      domes.forEach(([x, y, z, R], i) => { o.position.set(x, y, z); o.rotation.set(0, 0, 0); o.scale.setScalar(R); o.updateMatrix(); dm.setMatrixAt(i, o.matrix); });
+      dm.frustumCulled = false;
+      group.add(dm);
+    }
+    await document.fonts?.load('150px Lobster').catch(() => {});
+    signs.slice(0, SIGNS.length).forEach(([x, y, z], i) => {
+      const color = [NEON.pink, NEON.cyan, NEON.yellow, NEON.orange, NEON.purple][i % 5];
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(28, 7), new THREE.MeshBasicMaterial({
+        map: signTexture(SIGNS[i], color), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+      m.position.set(x, y + 4.5, z);
+      m.rotation.y = Math.atan2(-x, -z); // лицом к центру города
+      group.add(m);
+    });
+    console.log(`vice: ${domes.length} куполов, ${Math.min(signs.length, SIGNS.length)} вывесок`);
+  }
+
   let net = null, agents = [], last = 0, drive = false, propsDone = false, lastShout = 0;
   fetchRoads(config.origin).then(ways => {
     if (!ways || !ways.length) { console.warn('vice: улицы не загрузились, машин не будет'); return; }
@@ -588,6 +704,9 @@ export function initVice(scene, config, camera, controls, getMeshes = () => []) 
     ];
     cars.count = lights.count = glow.count = N_CARS;
     shirts.count = bodies.count = N_PEOPLE;
+    const roads = new THREE.Mesh(roadGeometry(ways), new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+    roads.renderOrder = -1;
+    group.add(roads);
     console.log(`vice: ${ways.length} улиц, ${N_CARS} машин, ${N_PEOPLE} пешеходов`);
   });
   const SHOUTS = ['Эй! Тут вообще-то тротуар!', 'Права купил, что ли?!', 'Масло своё вези аккуратнее!', 'Я в «Кружево FM» позвоню!', 'Совсем уже, 1147 год на дворе!'];
@@ -597,7 +716,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => []) 
     const t = now / 1000, dt = Math.min(0.1, last ? t - last : 0);
     last = t;
     if (!net) return;
-    if (!propsDone && document.getElementById('loading')?.hidden) { propsDone = true; buildGrid(); placeProps(); }
+    if (!propsDone && document.getElementById('loading')?.hidden) { propsDone = true; buildGrid(); placeProps(); placeLandmarks(); }
     if (game.driving) driveStep(dt, t);
     const boost = drive ? 3 : 1, px = pos.x, pz = pos.y, pspeed = game.driving ? vel.length() : 0;
     for (let k = 0; k < agents.length; k++) {

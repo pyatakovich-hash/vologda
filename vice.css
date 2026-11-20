@@ -85,3 +85,6 @@ body.driving .game-hud { display: block; }
 .vice-toast.game { bottom: auto; top: 30%; }
 .vice-toast.win b { color: #b8ffd9; text-shadow: 0 0 8px #3dff9a, 0 0 22px #3dff9a; }
 .vice-toast.fail b { color: #ffd1e6; }
+dialog.about, .about { background: rgba(22, 6, 42, .97); color: var(--ink); }
+.about a { color: #ffe6f3; text-decoration-color: var(--neon-pink); }
+.about-close { background: var(--neon-pink); color: #1c0a33; }
