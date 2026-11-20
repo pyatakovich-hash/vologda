@@ -22,7 +22,7 @@ const CAR_SCALE = 2.4;      // машины и люди крупнее наст�
 const PERSON_SCALE = 1.9;
 const SPAWN_RADIUS = 2600;  // м от центра: здесь машины и люди появляются, дальше просто уезжают
 
-const CACHE_KEY = 'vologda-vice-roads-v5';
+const CACHE_KEY = 'vologda-vice-roads-v6';
 const STYLE_URL = `https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json?key=${CARTO_KEY}`;
 const ROAD_ZOOM = 14;
 const SNAP = 2; // м: вершины ближе этого считаются одним перекрёстком
@@ -364,7 +364,7 @@ async function fetchRoads(origin) {
           p.push(px, pz);
           ids.push(`${Math.round(px / SNAP)},${Math.round(pz / SNAP)}`);
         }
-        ways.push({ p, n: ids, f: car ? 0 : 1, k: !car ? 0 : kind === 'minor_road' ? 1 : 2 });
+        ways.push({ p, n: ids, f: car ? 0 : 1, k: !car ? 0 : kind === 'minor_road' ? 1 : 2, b: tags.is_bridge === true || tags.is_bridge === 'true' ? 1 : 0, nm: tags['name:ru'] || tags.name || '' });
       }
     }
   }));
@@ -547,6 +547,9 @@ function stationBanner(name, genre) {
   setTimeout(() => el.remove(), 2800);
 }
 
+let namesPromise = null;
+const placeNames = () => namesPromise ??= fetch('data/search.json').then(r => r.json()).then(d => d.names || []).catch(() => []);
+
 function toast(html) {
   document.querySelector('.vice-toast')?.remove();
   const el = document.createElement('div');
@@ -572,7 +575,36 @@ function roadGeometry(ways, H = () => 0) {
     idx.push(i, i + 2, i + 1, i, i + 3, i + 2);
   };
   const ASPHALT = [0.17, 0.12, 0.26], WALK = [0.3, 0.17, 0.34];
-  const EDGE = [[0.12, 0.9, 1.0], [1.0, 0.18, 0.58]], DASH = [1.0, 0.89, 0.36];
+  const EDGE = [[0.12, 0.9, 1.0], [1.0, 0.18, 0.58]], DASH = [1.0, 0.89, 0.36], ZEBRA = [0.92, 0.88, 1.0];
+  // Перекрёстки: узел, куда сходятся три и больше «рукава» улиц, — перед ним «зебра» поперёк каждого рукава.
+  // Рукава считаем по разным соседним узлам: одна и та же улица из соседних тайлов не даёт ложных перекрёстков.
+  const nb = new Map();
+  for (const w of ways) {
+    if (!w.k || !w.n) continue;
+    w.n.forEach((id, i) => {
+      if (!nb.has(id)) nb.set(id, new Set());
+      if (i > 0 && w.n[i - 1] !== id) nb.get(id).add(w.n[i - 1]);
+      if (i < w.n.length - 1 && w.n[i + 1] !== id) nb.get(id).add(w.n[i + 1]);
+    });
+  }
+  const arms = new Map([...nb].map(([id, set]) => [id, set.size]));
+  for (const w of ways) {
+    if (!w.k || !w.n || Math.hypot(w.p[0], w.p[1]) > 3200) continue;
+    const width = w.k === 2 ? 15 : 8.5;
+    for (let i = 0; i < w.n.length; i++) {
+      if ((arms.get(w.n[i]) || 0) < 3) continue;
+      for (const j of [i - 1, i + 1]) {
+        if (j < 0 || j >= w.n.length) continue;
+        const cx = w.p[2 * i], cz = w.p[2 * i + 1], dx = w.p[2 * j] - cx, dz = w.p[2 * j + 1] - cz, L = Math.hypot(dx, dz);
+        if (L < 22) continue;
+        const fx = dx / L, fz = dz / L, rx = -fz, rz = fx, d = 11;
+        for (let o = -width / 2 + 1.2; o <= width / 2 - 1.2; o += 1.3) {
+          const mx = cx + fx * d + rx * o, mz = cz + fz * d + rz * o;
+          quad(mx - fx * 1.6, mz - fz * 1.6, mx + fx * 1.6, mz + fz * 1.6, 0.32, 0.09, ZEBRA);
+        }
+      }
+    }
+  }
   for (const w of ways) {
     const width = w.k === 2 ? 15 : w.k === 1 ? 8.5 : 2.6;
     // Длинные отрезки режем по 25 м, чтобы лента повторяла рельеф.
@@ -794,24 +826,44 @@ function riverBanks(rivers) {
 }
 
 // ---------- Мосты ----------
-// Участки дорог над водой (+12 м на берега) — это пролёты мостов.
-function findBridges(ways) {
-  const out = [];
+// Мосты: 1) все дороги и тропы с отметкой «мост» в OSM; 2) где отметки нет, но дорога пересекает русло поперёк.
+function findBridges(ways, rivers = []) {
+  const out = [], osm = [];
+  const lenOf = p => { let L = 0; for (let i = 2; i < p.length; i += 2) L += Math.hypot(p[i] - p[i - 2], p[i + 1] - p[i - 1]); return L; };
+  const keys = new Set(); // одна и та же линия приходит из соседних тайлов дважды
   for (const w of ways) {
-    if (w.f) continue;
+    if (!w.b || lenOf(w.p) < 6) continue;
+    const key = w.p.map(v => Math.round(v)).join(',');
+    if (keys.has(key)) continue;
+    keys.add(key);
+    const B = { p: densify(w.p, 4), w: w.f ? 3.6 : w.k === 2 ? 15 : 8.5, foot: !!w.f, name: w.nm };
+    out.push(B); osm.push(B);
+  }
+  // Направление ближайшей реки (по линии русла) — чтобы дорогу вдоль набережной не принять за мост.
+  const riverDir = (x, z) => {
+    let best = null, bd = 90;
+    for (const R of rivers) for (let i = 2; i < R.p.length; i += 2) {
+      const ax = R.p[i - 2], az = R.p[i - 1], bx = R.p[i], bz = R.p[i + 1], dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz || 1;
+      const f = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / L2)), d = Math.hypot(ax + dx * f - x, az + dz * f - z);
+      if (d < bd) { bd = d; const L = Math.sqrt(L2); best = [dx / L, dz / L]; }
+    }
+    return best;
+  };
+  const nearOsm = (x, z) => osm.some(B => { for (let i = 0; i < B.p.length; i += 2) if (Math.hypot(B.p[i] - x, B.p[i + 1] - z) < 35) return true; return false; });
+  for (const w of ways) {
+    if (w.b) continue;
     const pts = densify(w.p, 4);
     let s0 = -1, s1 = -1;
     const flush = () => {
       if (s0 < 0) return;
-      // Мост — только если дорога пересекает воду поперёк: в середине участка вода и слева, и справа от неё,
-      // а участок начинается и кончается на суше. Дорога вдоль набережной мостом не считается.
       const m = 2 * Math.floor((s0 + s1) / 4), j = Math.min(pts.length - 2, m + 2), i0 = Math.max(0, j - 2);
-      const dx = pts[j] - pts[i0], dz = pts[j + 1] - pts[i0 + 1], L = Math.hypot(dx, dz) || 1, nx = -dz / L, nz = dx / L;
-      const across = [12, 24].every(d => isWater(pts[m] + nx * d, pts[m + 1] + nz * d) && isWater(pts[m] - nx * d, pts[m + 1] - nz * d));
-      const ends = s0 > 0 && s1 < pts.length - 2, len = (s1 - s0) / 2 * 4;
-      if (across && ends && len >= 8 && len < 400) {
-        const a = Math.max(0, s0 - 6), b = Math.min(pts.length - 2, s1 + 6);
-        out.push({ p: pts.slice(a, b + 2), w: w.k === 2 ? 15 : 8.5 });
+      const dx = pts[j] - pts[i0], dz = pts[j + 1] - pts[i0 + 1], L = Math.hypot(dx, dz) || 1, fx = dx / L, fz = dz / L, nx = -fz, nz = fx;
+      const mx = pts[m], mz = pts[m + 1], len = (s1 - s0) / 2 * 4 + 4;
+      const across = isWater(mx + nx * 4, mz + nz * 4) && isWater(mx - nx * 4, mz - nz * 4);
+      const rd = riverDir(mx, mz), alongRiver = rd && Math.abs(rd[0] * fx + rd[1] * fz) > 0.82;
+      if (across && !alongRiver && s0 > 0 && s1 < pts.length - 2 && len < 300 && !nearOsm(mx, mz)) {
+        const a = Math.max(0, s0 - 4), b = Math.min(pts.length - 2, s1 + 4);
+        out.push({ p: pts.slice(a, b + 2), w: w.f ? 3.6 : w.k === 2 ? 15 : 8.5, foot: !!w.f });
       }
       s0 = s1 = -1;
     };
@@ -912,8 +964,8 @@ function bridgeGeometry(bridges, Ht) {
         }
       }
     }
-    // Фонари на парапетах через ~22 м.
-    for (let s = 6; s < B.L - 4; s += 22) for (const side of [half - 0.2, -(half - 0.2)]) {
+    // Фонари на парапетах через ~22 м (на пешеходных мостиках — реже).
+    for (let s = 6; s < B.L - 4; s += B.foot ? 40 : 22) for (const side of [half - 0.2, -(half - 0.2)]) {
       const q = at(s), x = q.x - Math.sin(q.ang) * side, z = q.z + Math.cos(q.ang) * side;
       box(x, q.y + 1.1, z, 0.12, 4.2, 0.12, q.ang, [0.4, 0.36, 0.5]);
       box(x, q.y + 5.2, z, 0.35, 0.45, 0.35, q.ang, [1.4, 1.2, 0.9]);
@@ -1052,7 +1104,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
         const fx = (x1 - x0) / L, fz = (z1 - z0) / L;
         for (let d = carry; d < L; d += 70) {
           const side = spots.length % 2 ? 1 : -1, x = x0 + fx * d - fz * 9 * side, z = z0 + fz * d + fx * 9 * side;
-          if (!blocked(x, z) && !blocked(x + 1.5, z) && !blocked(x - 1.5, z) && !blocked(x, z + 1.5) && !blocked(x, z - 1.5))
+          if (!isWater(x, z) && !blocked(x, z) && !blocked(x + 1.5, z) && !blocked(x - 1.5, z) && !blocked(x, z + 1.5) && !blocked(x, z - 1.5))
             spots.push({ x, z, ang: Math.atan2(-fz, fx) + (side > 0 ? 0 : Math.PI) + Math.PI / 2 });
           carry = d + 70 - L;
         }
@@ -1094,8 +1146,8 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
 
   // ---------- Купола на храмах и вывески на высоких домах (по названиям из поиска) ----------
   async function placeLandmarks() {
-    let names = [];
-    try { names = (await fetch('data/search.json').then(r => r.json())).names || []; } catch { return; }
+    const names = await placeNames();
+    if (!names.length) return;
     const domes = [], signs = [];
     for (const [name, , x, z, , gid] of names) {
       if (!(gid >= 0) || Math.hypot(x, z) > SPAWN_RADIUS) continue;
@@ -1156,7 +1208,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
       const nearRoad = (x, z) => roadCells.has(`${Math.floor(x / 12)},${Math.floor(z / 12)}`);
       const emb = embankmentGeometry([...(data.water || []), ...riverBanks(rivers)], Ht, rivers, nearRoad); // заодно строит маску воды
       // Мосты: где дорога идёт над водой, полотно поднимается аркой; дальше всё ездит и ставится по высоте с мостами.
-      const bridges = findBridges(ways);
+      const bridges = findBridges(ways, rivers);
       const Hs = bridgeSurface(bridges, Ht);
       H = Hs;
       const roads = new THREE.Mesh(roadGeometry(ways, Hs), new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
@@ -1302,8 +1354,9 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
   }
   const hud = document.createElement('div');
   hud.className = 'game-hud';
-  hud.innerHTML = `<div class="g-money">₽ 0</div><div class="g-timer"></div><div class="g-goal"><i class="g-arrow">➤</i><span></span></div>
-    <p class="g-help">W/S — газ и тормоз · A/D — руль · Пробел — ручник · Q/E — радио · F — выйти</p>`;
+  hud.innerHTML = `<div class="g-money">₽ 0</div><div class="g-task"></div><div class="g-timer"></div><div class="g-goal" hidden><i class="g-arrow">➤</i><span></span></div>
+    <p class="g-help">W/S — газ и тормоз · A/D — руль · Пробел — ручник · Q/E — радио · M — задания · F — выйти</p>
+    <div class="g-menu" hidden><b>Задания</b><div class="g-list"></div><small>Цифра или клик — выбрать · M — закрыть</small></div>`;
   document.body.append(hud);
   const btn = document.createElement('button');
   btn.className = 'drive-btn';
@@ -1322,18 +1375,216 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
     }
     return best;
   }
-  function randomPickup() {
-    for (let k = 0; k < 200; k++) {
+  // ---------- Задания: меню (M) и четыре вида ----------
+  const MISSIONS = [
+    { id: 'butter', name: 'Масло в Кремль', text: 'Забрать бочку на складе и довезти до Кремля, пока не растаяло' },
+    { id: 'taxi', name: 'Такси', text: 'Подобрать пассажира и отвезти по адресу — чем быстрее, тем больше чаевые' },
+    { id: 'race', name: 'Гонка по кольцам', text: '8 неоновых колец по улицам, время и рекорд' },
+    { id: 'lace', name: 'Развоз кружева', text: 'Забрать кружево и развезти по трём магазинам' },
+    { id: 'free', name: 'Просто кататься', text: 'Без заданий: город, радио, ветер' },
+  ];
+  const menu = hud.querySelector('.g-menu');
+  menu.querySelector('.g-list').innerHTML = MISSIONS.map((m, i) => `<button data-i="${i}"><kbd>${i + 1}</kbd><b>${m.name}</b><span>${m.text}</span></button>`).join('');
+  menu.onclick = e => { const b = e.target.closest('button'); if (b) startMission(MISSIONS[+b.dataset.i].id); };
+  const openMenu = (v = true) => { menu.hidden = !v; };
+
+  // Кольца гонки: текущее яркое, следующее бледное.
+  const ringGeo = new THREE.TorusGeometry(9, 0.9, 10, 40);
+  const rings = [NEON.cyan, NEON.purple].map((c, i) => {
+    const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: i ? 0.35 : 0.9, blending: THREE.AdditiveBlending, depthWrite: false }));
+    m.visible = false; group.add(m); return m;
+  });
+
+  const carVertex = (x, z) => nearestVertex(x, z, w => !w.f);
+  const vxz = v => ({ x: v.w.p[2 * v.i], z: v.w.p[2 * v.i + 1] });
+  function randomRoadPoint(from, min, max) {
+    for (let k = 0; k < 300; k++) {
       const w = net.ways[net.randomCarWay()], i = Math.floor(Math.random() * (w.p.length / 2));
-      const x = w.p[2 * i], z = w.p[2 * i + 1], d = Math.hypot(x - pos.x, z - pos.y);
-      if (d > 500 && d < 1300 && Math.hypot(x, z) > 500) return { x, z };
+      const x = w.p[2 * i], z = w.p[2 * i + 1], d = Math.hypot(x - from.x, z - from.z);
+      if (d > min && d < max && !isWater(x, z)) return { x, z };
     }
-    return { x: pos.x + 600, z: pos.y };
+    return vxz(carVertex(from.x + min, from.z));
   }
-  function newMission() {
-    const k = nearestVertex(0, 0, w => !w.f);
-    mission = { stage: 'pickup', pickup: randomPickup(), kremlin: { x: k.w.p[2 * k.i], z: k.w.p[2 * k.i + 1] }, time: 0 };
-    banner('Новое задание', 'Забери бочку вологодского масла на складе (жёлтый луч)');
+  const STREET = /(^|\s)(ул|пер|пр-т|просп|наб|ш|пл|проезд|туп|б-р|бульв|линия)\.?$|улица|переулок|проспект|набережная|шоссе/i;
+  const SIGHT = /театр|музей|монастыр|церк|храм|собор|вокзал|парк|сквер|кремл|гостиниц|университет|институт|библиотек|рынок|стадион|торгов|кинотеатр|филармони|галере|кафе|ресторан|школ|гимнази|колледж|больниц|поликлиник|бассейн|дворец|дом культуры|центр|почт/i;
+  const SHOP = /магазин|универсам|супермаркет|гипермаркет|пят[её]рочк|магнит|лента|ярче|ТЦ|торгов/i;
+  const short = s => s.length > 42 ? s.slice(0, 40) + '…' : s;
+  // Случайное именное место в кольце [min, max] от точки, с подъездом по дороге (≤ 120 м).
+  async function namedPlace(from, min, max, re, avoid = []) {
+    const names = (await placeNames()).filter(n => re.test(n[0]) && !STREET.test(n[0]));
+    for (let k = 0; k < 120 && names.length; k++) {
+      const [name, , x, z] = names[Math.floor(Math.random() * names.length)];
+      const d = Math.hypot(x - from.x, z - from.z);
+      if (d < min || d > max || Math.hypot(x, z) > SPAWN_RADIUS || avoid.some(a => Math.hypot(a.x - x, a.z - z) < 150)) continue;
+      const v = carVertex(x, z), p = vxz(v);
+      if (Math.hypot(p.x - x, p.z - z) > 120) continue;
+      return { ...p, label: short(name) };
+    }
+    return { ...randomRoadPoint(from, min, max), label: 'адрес на карте' };
+  }
+  // Маршрут гонки: случайная прогулка по графу улиц, кольцо каждые ~step метров.
+  function roadWalk(from, n, step) {
+    const v = carVertex(from.x, from.z);
+    let w = v.w, k = v.i, dir = k === 0 ? 1 : k === w.p.length / 2 - 1 ? -1 : Math.random() < 0.5 ? 1 : -1;
+    let px = w.p[2 * k], pz = w.p[2 * k + 1], acc = 0, guard = 0, lastTurn = 0;
+    const pts = [];
+    const switchWay = force => {
+      const opts = (net.nodes.get(w.n[k]) || []).filter(([wi]) => net.ways[wi] !== w && !net.ways[wi].f);
+      if (!opts.length || (!force && Math.random() > 0.4)) return false;
+      const [wi, kk] = opts[Math.floor(Math.random() * opts.length)];
+      w = net.ways[wi]; k = kk;
+      const last = w.p.length / 2 - 1;
+      dir = kk === 0 ? 1 : kk === last ? -1 : Math.random() < 0.5 ? 1 : -1;
+      return true;
+    };
+    while (pts.length < n && guard++ < 20000) {
+      const nk = k + dir;
+      if (nk < 0 || nk >= w.p.length / 2) { if (!switchWay(true)) dir = -dir; continue; }
+      const nx = w.p[2 * nk], nz = w.p[2 * nk + 1], seg = Math.hypot(nx - px, nz - pz);
+      acc += seg; lastTurn += seg; px = nx; pz = nz; k = nk;
+      if (acc >= step && !isWater(px, pz)) {
+        acc = 0;
+        const prev = pts[pts.length - 1] || from;
+        pts.push({ x: px, z: pz, dir: Math.atan2(px - prev.x, pz - prev.z) });
+      }
+      if (lastTurn > 120 && switchWay(false)) lastTurn = 0;
+    }
+    return pts;
+  }
+
+  const PHRASES = {
+    taxi: ['Радио погромче — люблю «Кружево FM».', 'Только аккуратно, у меня торт.', 'Опаздываю, шеф, жми!', 'Через мост, если можно, — красиво же.', 'Я в Вологде проездом, покажите город по пути!'],
+    tip: ['Спасибо, шеф! Держите на чай.', 'Быстро! Даже масло не растаяло.', 'Вот это вы водите. Как в кино!', 'Пять звёзд и пряник сверху.'],
+  };
+  const pick = a => a[Math.floor(Math.random() * a.length)];
+  const fmtTime = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
+  const RACE_BEST = 'vologda-race-best';
+
+  async function startMission(id) {
+    openMenu(false);
+    rings.forEach(r => { r.visible = false; });
+    hud.querySelector('.g-timer').textContent = '';
+    hud.querySelector('.g-timer').classList.remove('hot');
+    const me = { x: pos.x, z: pos.y };
+    if (id === 'free') {
+      mission = { kind: 'free', goals: [], i: 0 };
+      banner('Свободная езда', 'M — открыть задания, Q/E — переключить радио');
+    } else if (id === 'butter') {
+      const k = carVertex(0, 0);
+      mission = { kind: 'butter', i: 0, goals: [{ ...randomRoadPoint(me, 500, 1300), label: 'Склад масла', color: NEON.yellow }, { ...vxz(k), label: 'Кремль', color: NEON.pink }] };
+      banner('Масло в Кремль', 'Забери бочку вологодского масла на складе (жёлтый луч)');
+    } else if (id === 'taxi') {
+      mission = { kind: 'wait' };
+      const pickup = { ...randomRoadPoint(me, 250, 800), label: 'Пассажир', color: NEON.cyan };
+      const dest = await namedPlace(pickup, 600, 2200, SIGHT, [pickup]);
+      mission = { kind: 'taxi', i: 0, goals: [pickup, { ...dest, color: NEON.pink }] };
+      banner('Такси', 'Пассажир ждёт у голубого луча');
+    } else if (id === 'race') {
+      const pts = roadWalk(me, 8, 230);
+      if (pts.length < 4) { banner('Гонка', 'Здесь слишком мало улиц — отъедьте в город', 'fail'); mission = { kind: 'free', goals: [], i: 0 }; return; }
+      mission = { kind: 'race', i: 0, t: 0, goals: pts.map((p, j) => ({ ...p, ring: true, label: `Кольцо ${j + 1}/${pts.length}`, color: NEON.cyan })) };
+      const best = +localStorage.getItem(RACE_BEST) || 0;
+      banner('Гонка по кольцам', `${pts.length} колец, время пошло${best ? ` · рекорд ${fmtTime(best)}` : ''}`);
+    } else if (id === 'lace') {
+      mission = { kind: 'wait' };
+      const names = await placeNames();
+      const museum = names.find(n => /музей кружева/i.test(n[0]));
+      const start = museum ? { ...vxz(carVertex(museum[2], museum[3])), label: 'Музей кружева' } : { ...randomRoadPoint(me, 300, 900), label: 'Кружевная мастерская' };
+      const stops = [];
+      let from = start;
+      for (let j = 0; j < 3; j++) { const s = await namedPlace(from, 350, 1400, SHOP, [start, ...stops]); stops.push({ ...s, color: NEON.orange }); from = s; }
+      mission = { kind: 'lace', i: 0, goals: [{ ...start, color: NEON.yellow }, ...stops] };
+      banner('Развоз кружева', `Забери коробки: ${start.label} (жёлтый луч)`);
+    }
+  }
+  function pay(prize, title, text) {
+    money += prize;
+    hud.querySelector('.g-money').textContent = `₽ ${money.toLocaleString('ru')}`;
+    dispatchEvent(new CustomEvent('vologda:money', { detail: prize })); // деньги уходят и в бюджет города
+    banner(title, `+${prize.toLocaleString('ru')} ₽ · ${text}`, 'win');
+  }
+  function finish(next = true) {
+    const kind = mission.kind;
+    mission = { kind: 'wait' };
+    rings.forEach(r => { r.visible = false; });
+    hud.querySelector('.g-timer').textContent = '';
+    if (next) setTimeout(() => { if (game.driving && mission.kind === 'wait') startMission(kind); }, 4000);
+  }
+  function fail(title, text) {
+    banner(title, text, 'fail');
+    finish();
+  }
+  // Цель достигнута.
+  function arrive(g) {
+    const m = mission, last = m.i === m.goals.length - 1, d = j => Math.hypot(m.goals[j].x - pos.x, m.goals[j].z - pos.y);
+    if (m.kind === 'butter') {
+      if (!last) { m.i++; m.left = Math.round(d(1) / 11 + 25); banner('Бочка на борту', `Довези масло в Кремль за ${m.left} секунд (розовый луч)`); return; }
+      pay(500 + Math.round(m.left) * 20, 'Задание выполнено', 'масло доставлено в Кремль'); finish(); return;
+    }
+    if (m.kind === 'taxi') {
+      if (!last) { m.i++; m.left = Math.round(d(1) / 10 + 30); m.dist = d(1);
+        subtitle(`Пассажир: «${m.goals[1].label}», пожалуйста. ${pick(PHRASES.taxi)}`); banner('Пассажир в машине', `${m.goals[1].label} · ${m.left} с`); return; }
+      subtitle(`Пассажир: ${pick(PHRASES.tip)}`);
+      pay(300 + Math.round(m.dist * 0.8 + m.left * 15), 'Приехали', g.label); finish(); return;
+    }
+    if (m.kind === 'race') {
+      if (!last) { m.i++; subtitle(`Кольцо ${m.i}/${m.goals.length} · ${fmtTime(m.t)}`); return; }
+      const best = +localStorage.getItem(RACE_BEST) || 0, record = !best || m.t < best;
+      if (record) try { localStorage.setItem(RACE_BEST, m.t.toFixed(1)); } catch { /* без рекордов */ }
+      pay(Math.max(300, Math.round(3000 - m.t * 12)) + (record ? 1000 : 0), record ? 'Новый рекорд!' : 'Финиш', `время ${fmtTime(m.t)}${best && !record ? ` · рекорд ${fmtTime(best)}` : ''}`);
+      finish(); return;
+    }
+    if (m.kind === 'lace') {
+      if (m.i === 0) {
+        let total = 0;
+        for (let j = 1; j < m.goals.length; j++) total += Math.hypot(m.goals[j].x - m.goals[j - 1].x, m.goals[j].z - m.goals[j - 1].z);
+        m.i++; m.left = Math.round(total / 10 + 40);
+        banner('Кружево на борту', `Три магазина за ${m.left} секунд (оранжевый луч)`); return;
+      }
+      if (!last) { m.i++; money += 400; dispatchEvent(new CustomEvent('vologda:money', { detail: 400 }));
+        hud.querySelector('.g-money').textContent = `₽ ${money.toLocaleString('ru')}`;
+        banner(`Магазин ${m.i - 1}/3`, `+400 ₽ · ${g.label}`); return; }
+      pay(400 + Math.round(m.left) * 15, 'Кружево развезено', 'все три магазина довольны'); finish(); return;
+    }
+  }
+  // Каждый кадр: луч, стрелка, таймер, проверка прибытия.
+  function missionStep(dt, t) {
+    const m = mission;
+    const goal = m?.goals?.[m.i];
+    beam.visible = !!goal && !goal.ring;
+    hud.querySelector('.g-goal').hidden = !goal;
+    hud.querySelector('.g-task').textContent = m && m.kind !== 'wait' && m.kind !== 'free' ? MISSIONS.find(x => x.id === m.kind).name : '';
+    rings[0].visible = !!goal?.ring;
+    rings[1].visible = !!(goal?.ring && m.goals[m.i + 1]);
+    if (!goal) return;
+    const g = goal;
+    if (g.ring) {
+      rings.forEach((r, j) => { const q = m.goals[m.i + j]; if (!q) return;
+        r.position.set(q.x, H(q.x, q.z) + 9.5, q.z); r.rotation.set(0, q.dir, 0); r.rotation.y += j ? 0 : Math.sin(t * 2) * 0.05; });
+      rings[0].material.opacity = 0.7 + 0.25 * Math.sin(t * 6);
+    } else {
+      beam.position.set(g.x, H(g.x, g.z) + 210, g.z);
+      beam.material.color.set(g.color || NEON.pink);
+      beam.material.opacity = 0.28 + 0.1 * Math.sin(t * 4);
+    }
+    const dx = g.x - pos.x, dz = g.z - pos.y, dist = Math.hypot(dx, dz);
+    const rel = Math.atan2(-dz, dx) - ang;
+    hud.querySelector('.g-arrow').style.transform = `rotate(${-rel - Math.PI / 2}rad)`;
+    hud.querySelector('.g-goal span').textContent = `${g.label} · ${Math.round(dist)} м`;
+    const timer = hud.querySelector('.g-timer');
+    if (m.kind === 'race') { m.t += dt; timer.textContent = fmtTime(m.t); }
+    else if (m.left !== undefined) {
+      m.left -= dt;
+      timer.textContent = `${Math.max(0, Math.ceil(m.left))} с`;
+      timer.classList.toggle('hot', m.left < 10);
+      if (m.left <= 0) {
+        timer.classList.remove('hot');
+        if (m.kind === 'butter') { m.i = 0; delete m.left; timer.textContent = ''; banner('Масло растаяло', 'Вернись на склад за новой бочкой', 'fail'); return; }
+        if (m.kind === 'taxi') { fail('Пассажир ушёл', 'Слишком долго. Новый заказ через пару секунд'); return; }
+        if (m.kind === 'lace') { fail('Магазины закрылись', 'Кружево не успели развезти'); return; }
+      }
+    }
+    if (dist < (g.ring ? 13 : 16)) arrive(g);
   }
   function banner(title, text, cls = '') {
     toast(`<b>${title}</b><span>${text}</span>`);
@@ -1354,12 +1605,13 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
       ang = Math.atan2(-(w.p[2 * j + 1] - w.p[2 * i + 1]), w.p[2 * j] - w.p[2 * i]);
       vel.set(0, 0);
       camera.position.set(pos.x - Math.cos(ang) * 40, H(pos.x, pos.y) + 25, pos.y + Math.sin(ang) * 40);
-      if (!mission) newMission();
-      beam.visible = true;
+      if (!mission) openMenu(true);
       startSynth(station);
     } else {
       stopSynth();
       beam.visible = false;
+      openMenu(false);
+      rings.forEach(r => { r.visible = false; });
       controls.target.set(pos.x, 0, pos.y);
       camera.position.set(pos.x + 200, 220, pos.y + 300);
       controls.update();
@@ -1430,42 +1682,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
     camera.lookAt(pos.x + nfx * 14, gy + 2, pos.y + nfz * 14);
     controls.target.set(pos.x, 0, pos.y);
 
-    // Задание
-    beam.visible = mission.stage !== 'wait';
-    if (mission.stage === 'wait') return;
-    const target = mission.stage === 'pickup' ? mission.pickup : mission.kremlin;
-    beam.position.set(target.x, H(target.x, target.z) + 210, target.z);
-    beam.material.color.set(mission.stage === 'pickup' ? NEON.yellow : NEON.pink);
-    beam.material.opacity = 0.28 + 0.1 * Math.sin(t * 4);
-    const dx = target.x - pos.x, dz = target.z - pos.y, dist = Math.hypot(dx, dz);
-    const rel = Math.atan2(-dz, dx) - ang;
-    hud.querySelector('.g-arrow').style.transform = `rotate(${-rel - Math.PI / 2}rad)`;
-    hud.querySelector('.g-goal span').textContent = (mission.stage === 'pickup' ? 'Склад масла' : 'Кремль') + ` · ${Math.round(dist)} м`;
-    if (mission.stage === 'deliver') {
-      mission.time -= dt;
-      hud.querySelector('.g-timer').textContent = `${Math.max(0, Math.ceil(mission.time))} с`;
-      hud.querySelector('.g-timer').classList.toggle('hot', mission.time < 10);
-      if (mission.time <= 0) {
-        mission.stage = 'pickup';
-        hud.querySelector('.g-timer').textContent = '';
-        banner('Масло растаяло', 'Вернись на склад за новой бочкой', 'fail');
-      }
-    }
-    if (dist < 16) {
-      if (mission.stage === 'pickup') {
-        mission.stage = 'deliver';
-        mission.time = Math.round(Math.hypot(mission.kremlin.x - pos.x, mission.kremlin.z - pos.y) / 11 + 25);
-        banner('Бочка на борту', `Довези масло в Кремль за ${mission.time} секунд (розовый луч)`);
-      } else {
-        const prize = 500 + Math.round(mission.time) * 20;
-        money += prize;
-        hud.querySelector('.g-money').textContent = `₽ ${money.toLocaleString('ru')}`;
-        hud.querySelector('.g-timer').textContent = '';
-        banner('Задание выполнено', `+${prize.toLocaleString('ru')} ₽ · масло доставлено в Кремль`, 'win');
-        mission = { stage: 'wait' };
-        setTimeout(() => { if (game.driving) newMission(); else mission = null; }, 3500);
-      }
-    }
+    missionStep(dt, t);
   }
 
   addEventListener('keydown', e => {
@@ -1473,8 +1690,11 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
     const k = e.key.toLowerCase();
     if (k === 'f' || k === 'а') { if (!document.body.classList.contains('building')) toggleDrive(); return; }
     if (!game.driving) return;
-    const map = { 'ц': 'w', 'ы': 's', 'ф': 'a', 'в': 'd', 'й': 'q', 'у': 'e' };
+    const map = { 'ц': 'w', 'ы': 's', 'ф': 'a', 'в': 'd', 'й': 'q', 'у': 'e', 'ь': 'm' };
     const kk = map[k] || k;
+    if (kk === 'm') { openMenu(menu.hidden); return; }
+    if (kk === 'escape' && !menu.hidden) { openMenu(false); return; }
+    if (!menu.hidden && /^[1-5]$/.test(kk)) { startMission(MISSIONS[+kk - 1].id); return; }
     if (kk === 'q' || kk === 'e') { startSynth((station + (kk === 'e' ? 1 : STATIONS.length - 1)) % STATIONS.length); return; }
     keys.add(kk);
     if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(kk)) e.preventDefault();

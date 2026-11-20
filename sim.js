@@ -124,23 +124,48 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
   const zi = (x, z) => { const ix = Math.floor((x + ZHALF) / ZC), iz = Math.floor((z + ZHALF) / ZC); return ix < 0 || iz < 0 || ix >= ZN || iz >= ZN ? -1 : iz * ZN + ix; };
   const zc = ci => [(ci % ZN + 0.5) * ZC - ZHALF, (Math.floor(ci / ZN) + 0.5) * ZC - ZHALF];
 
-  // ---------- Дороги в сетке зон: где асфальт и какие клетки «у дороги» ----------
+  // ---------- Дороги в сетке зон: асфальт — по расстоянию до оси, «у дороги» — до 32 м от кромки ----------
+  const segHash = new Map(); // клетка 24 м → отрезки дорог [ax, az, bx, bz, полуширина]
+  function addSeg(seg) {
+    const [ax, az, bx, bz, half] = seg, r = half + 2;
+    for (let cx = Math.floor((Math.min(ax, bx) - r) / 24); cx <= Math.floor((Math.max(ax, bx) + r) / 24); cx++)
+      for (let cz = Math.floor((Math.min(az, bz) - r) / 24); cz <= Math.floor((Math.max(az, bz) + r) / 24); cz++) {
+        const k = cx + ',' + cz;
+        if (!segHash.has(k)) segHash.set(k, []);
+        segHash.get(k).push(seg);
+      }
+  }
+  // Ближайшая дорога (в радиусе ~60 м): расстояние до кромки асфальта и угол оси.
+  function roadInfo(x, z) {
+    let best = { d: Infinity, dir: 0 };
+    const cx0 = Math.floor(x / 24), cz0 = Math.floor(z / 24);
+    for (let a = -2; a <= 2; a++) for (let b = -2; b <= 2; b++) for (const [ax, az, bx, bz, half] of segHash.get((cx0 + a) + ',' + (cz0 + b)) || []) {
+      const dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz || 1, f = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / L2));
+      const d = Math.hypot(ax + dx * f - x, az + dz * f - z) - half;
+      if (d < best.d) best = { d, dir: Math.atan2(dz, dx) };
+    }
+    return best;
+  }
   function markRoads(ways) {
     for (const w of ways) {
       if (w.f) continue;
       const half = w.k === 2 ? 7.5 : 4.5;
       for (let i = 2; i < w.p.length; i += 2) {
-        const ax = w.p[i - 2], az = w.p[i - 1], bx = w.p[i], bz = w.p[i + 1], L = Math.hypot(bx - ax, bz - az), k = Math.max(1, Math.ceil(L / 3));
-        for (let j = 0; j <= k; j++) {
-          const x = ax + (bx - ax) * j / k, z = az + (bz - az) * j / k;
-          for (const dx of [-half, 0, half]) for (const dz of [-half, 0, half]) { const c = zi(x + dx, z + dz); if (c >= 0) road[c] = 1; }
-          const ci = zi(x, z);
-          if (ci < 0) continue;
-          const ix = ci % ZN, iz = Math.floor(ci / ZN);
-          for (let a = -3; a <= 3; a++) for (let b = -3; b <= 3; b++) { const xx = ix + a, zz = iz + b; if (xx >= 0 && zz >= 0 && xx < ZN && zz < ZN) served[zz * ZN + xx] = 1; }
+        const seg = [w.p[i - 2], w.p[i - 1], w.p[i], w.p[i + 1], half];
+        addSeg(seg);
+        const [ax, az, bx, bz] = seg, r = half + 34, dx = bx - ax, dz = bz - az, L2 = dx * dx + dz * dz || 1;
+        const cl = v => Math.max(0, Math.min(ZN - 1, v));
+        const ix0 = cl(Math.floor((Math.min(ax, bx) - r + ZHALF) / ZC)), ix1 = cl(Math.floor((Math.max(ax, bx) + r + ZHALF) / ZC));
+        const iz0 = cl(Math.floor((Math.min(az, bz) - r + ZHALF) / ZC)), iz1 = cl(Math.floor((Math.max(az, bz) + r + ZHALF) / ZC));
+        for (let iz = iz0; iz <= iz1; iz++) for (let ix = ix0; ix <= ix1; ix++) {
+          const x = (ix + 0.5) * ZC - ZHALF, z = (iz + 0.5) * ZC - ZHALF, f = Math.max(0, Math.min(1, ((x - ax) * dx + (z - az) * dz) / L2));
+          const d = Math.hypot(ax + dx * f - x, az + dz * f - z) - half, c = iz * ZN + ix;
+          if (d < 1) road[c] = 1;
+          if (d < 32) served[c] = 1;
         }
       }
     }
+    zoneDirty = true;
   }
   const freeCell = ci => {
     if (ci < 0 || road[ci] || occ[ci]) return false;
@@ -166,7 +191,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
       const [x, z] = zc(ci);
       o.position.set(x, H(x, z) + 0.35, z); o.rotation.set(0, 0, 0); o.scale.setScalar(1); o.updateMatrix();
       zoneMesh.setMatrixAt(k, o.matrix);
-      zoneMesh.setColorAt(k, col.set(ZONE[zone[ci]].color));
+      zoneMesh.setColorAt(k, col.set(ZONE[zone[ci]].color).multiplyScalar(served[ci] ? 1 : 0.3)); // тёмные — далеко от дороги
       k++;
     }
     zoneMesh.count = k;
@@ -227,16 +252,23 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     return grow < 1;
   }
   const growing = new Set();
+  // Точки внутри повёрнутого прямоугольника дома (rotation.y = rot, ширина w — вдоль локальной X).
+  function rectPoints(b, step, fn) {
+    const ca = Math.cos(b.rot), sa = Math.sin(b.rot);
+    for (let u = -b.w / 2 + step / 2; u < b.w / 2; u += step) for (let v = -b.d / 2 + step / 2; v < b.d / 2; v += step)
+      fn(b.x + u * ca + v * sa, b.z - u * sa + v * ca);
+  }
+  const inRect = (b, x, z) => { const dx = x - b.x, dz = z - b.z, ca = Math.cos(b.rot), sa = Math.sin(b.rot);
+    return Math.abs(dx * ca - dz * sa) <= b.w / 2 && Math.abs(dx * sa + dz * ca) <= b.d / 2; };
   function occupy(b, v) {
-    const w = b.rot ? b.d : b.w, d = b.rot ? b.w : b.d;
-    for (let x = b.x - w / 2 + 2; x < b.x + w / 2; x += ZC / 2) for (let z = b.z - d / 2 + 2; z < b.z + d / 2; z += ZC / 2) { const c = zi(x, z); if (c >= 0) occ[c] = v; }
-    vice.setCells(b.x - w / 2, b.z - d / 2, b.x + w / 2, b.z + d / 2, v ? 1 : 0); // в дом теперь нельзя въехать
+    rectPoints(b, 4, (x, z) => { const c = zi(x, z); if (c >= 0) occ[c] = v; });
+    rectPoints(b, 1.5, (x, z) => vice.setCells(x, z, x, z, v ? 1 : 0)); // в дом нельзя въехать
     zoneDirty = true;
   }
-  function addBuilding(spec) {
+  function addBuilding(spec, born = performance.now()) {
     const k = bMesh[spec.kind];
     if (k.list.length >= MAXB) return null;
-    const b = { ...spec, y: H(spec.x, spec.z) - 2, inst: k.list.length, born: performance.now() }; // на 2 м в землю — не висит на склоне
+    const b = { ...spec, y: H(spec.x, spec.z) - 2, inst: k.list.length, born }; // на 2 м в землю — не висит на склоне
     k.list.push(b);
     k.mesh.count = k.list.length;
     k.mesh.setColorAt(b.inst, col.set(b.color));
@@ -247,7 +279,8 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     if (b.kind === 3 && b.chimney) {
       b.ch = chimneys.length;
       chimneys.push(b);
-      o.position.set(b.x + (b.rot ? b.d : b.w) * 0.3, b.y + b.h + 2, b.z + (b.rot ? b.w : b.d) * 0.25); o.rotation.set(0, 0, 0); o.scale.setScalar(1); o.updateMatrix();
+      const ca = Math.cos(b.rot), sa = Math.sin(b.rot), u = b.w * 0.3, v = b.d * 0.22;
+      o.position.set(b.x + u * ca + v * sa, b.y + b.h + 2, b.z - u * sa + v * ca); o.rotation.set(0, 0, 0); o.scale.setScalar(1); o.updateMatrix();
       chimneyMesh.setMatrixAt(b.ch, o.matrix); chimneyMesh.count = chimneys.length; chimneyMesh.instanceMatrix.needsUpdate = true;
     }
     if (b.kind === 1) S.addRes += b.res || 0;
@@ -271,35 +304,70 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     parks.push(p);
     o.position.set(x, H(x, z), z); o.rotation.set(0, rot, 0); o.scale.setScalar(1); o.updateMatrix();
     parkMesh.setMatrixAt(p.i, o.matrix); parkMesh.count = parks.length; parkMesh.instanceMatrix.needsUpdate = true;
-    vice.setCells(x - 15, z - 15, x + 15, z + 15, 0);
-    for (let xx = x - 13; xx < x + 15; xx += 5) for (let zz = z - 13; zz < z + 15; zz += 5) { const c = zi(xx, zz); if (c >= 0) occ[c] = 1; }
+    rectPoints(p, 4, (xx, zz) => { const c = zi(xx, zz); if (c >= 0) occ[c] = 1; });
     S.parks++;
+    zoneDirty = true;
+    return p;
+  }
+  function removePark(p) {
+    p.gone = true;
+    o.position.set(0, -1e4, 0); o.scale.setScalar(0); o.updateMatrix();
+    parkMesh.setMatrixAt(p.i, o.matrix); parkMesh.instanceMatrix.needsUpdate = true;
+    rectPoints(p, 4, (xx, zz) => { const c = zi(xx, zz); if (c >= 0) occ[c] = 0; });
+    S.parks--;
     zoneDirty = true;
   }
 
   // ---------- Рост зданий в зонах ----------
-  function tryGrow(type) {
-    if (!zoned.size) return;
-    const cells = [...zoned].filter(ci => zone[ci] === type && !occ[ci] && served[ci]);
-    if (!cells.length) return;
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const ci = cells[Math.floor(Math.random() * cells.length)], ix = ci % ZN, iz = Math.floor(ci / ZN);
-      if (ix + 1 >= ZN || iz + 1 >= ZN) continue;
-      const lot = [ci, ci + 1, ci + ZN, ci + ZN + 1];
-      if (!lot.every(c => zone[c] === type && !occ[c] && freeCell(c))) continue;
-      const [x0, z0] = zc(ci), x = x0 + ZC / 2, z = z0 + ZC / 2;
-      const pal = ZONE[type].palette, color = pal[Math.floor(Math.random() * pal.length)];
-      if (type === 1) {
-        const floors = S.happy > 70 && Math.random() < 0.25 ? 9 : 2 + Math.floor(Math.random() * 4);
-        addBuilding({ kind: 1, x, z, w: 16, d: 16, h: floors * 3, rot: 0, res: floors * 8, color });
-      } else if (type === 2) {
-        const floors = 1 + Math.floor(Math.random() * 3);
-        addBuilding({ kind: 2, x, z, w: 16, d: 16, h: floors * 3.6, rot: 0, jobs: floors * 6, color });
-      } else {
-        addBuilding({ kind: 3, x, z, w: 18, d: 18, h: 6 + Math.random() * 4, rot: 0, jobs: 30, color, chimney: Math.random() < 0.5 });
-      }
-      return;
+  // Участок — 2×2, 2×1, 1×2 или 1×1 клетки (по 10 м): так зона застраивается целиком, без «обрезков».
+  // Дом встаёт фасадом к ближайшей улице; если улица под углом, дом ужимается, чтобы влезть в участок.
+  const SHAPES = [[2, 2], [2, 1], [1, 2], [1, 1]];
+  function fitRotated(lotW, lotD, rot) {
+    const c = Math.abs(Math.cos(rot)), s = Math.abs(Math.sin(rot));
+    let best = null;
+    for (const [w0, d0] of [[lotW, lotD], [lotD, lotW]]) {
+      const k = Math.min(1, lotW / (w0 * c + d0 * s), lotD / (w0 * s + d0 * c)), w = w0 * k, d = d0 * k;
+      if (!best || w * d > best.w * best.d) best = { w, d };
     }
+    return best;
+  }
+  function tryGrow(type) {
+    const cells = [];
+    for (const ci of zoned) if (zone[ci] === type && !occ[ci] && served[ci]) cells.push(ci);
+    if (!cells.length) return false;
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const ci = cells[Math.floor(Math.random() * cells.length)], ix = ci % ZN, iz = Math.floor(ci / ZN);
+      for (const [sx, sz] of SHAPES) {
+        if (ix + sx > ZN || iz + sz > ZN) continue;
+        const lot = [];
+        for (let a = 0; a < sx; a++) for (let b = 0; b < sz; b++) lot.push(ci + a + b * ZN);
+        if (!lot.every(c => zone[c] === type && !occ[c] && freeCell(c))) continue;
+        const [x0, z0] = zc(ci), x = x0 + (sx - 1) * ZC / 2, z = z0 + (sz - 1) * ZC / 2;
+        const ri = roadInfo(x, z);
+        let rot = -ri.dir;
+        const snap = Math.round(rot / (Math.PI / 2)) * (Math.PI / 2);
+        if (Math.abs(rot - snap) < 0.26) rot = snap;                       // почти по осям — ставим ровно
+        let { w, d } = fitRotated(sx * ZC - 2.5, sz * ZC - 2.5, rot);
+        // Не залезать на асфальт, воду и старые дома: при помехе дом ужимается (до двух раз).
+        for (let k = 0; k < 3 && w >= 5 && d >= 5 && blockedWhy({ x, z, w, d, rot }); k++) { w *= 0.8; d *= 0.8; }
+        if (w < 5 || d < 5 || blockedWhy({ x, z, w, d, rot })) continue;
+        const pal = ZONE[type].palette, color = pal[Math.floor(Math.random() * pal.length)], area = w * d;
+        let spec;
+        if (type === 1) {
+          const floors = area < 90 ? 1 + Math.floor(Math.random() * 2) : area < 180 ? 2 + Math.floor(Math.random() * 2)
+            : S.happy > 70 && S.demand.r > 0.5 && Math.random() < 0.3 ? 9 : 3 + Math.floor(Math.random() * 3);
+          spec = { kind: 1, h: floors * 3, res: Math.max(4, Math.round(floors * area / 30)) };
+        } else if (type === 2) {
+          const floors = 1 + Math.floor(Math.random() * (area < 90 ? 1 : 3));
+          spec = { kind: 2, h: floors * 3.6, jobs: Math.max(3, Math.round(floors * area / 40)) };
+        } else {
+          spec = { kind: 3, h: 6 + Math.random() * 4, jobs: Math.max(6, Math.round(area / 8)), chimney: area > 150 && Math.random() < 0.6 };
+        }
+        addBuilding({ ...spec, x, z, w, d, rot, color });
+        return true;
+      }
+    }
+    return false;
   }
 
   // ---------- Бюджет, спрос, счастье ----------
@@ -322,6 +390,21 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     S.happy = Math.max(5, Math.min(99, 72 - (avgTax - 9) * 4 + S.parks * 1.5 - smog * 0.4 - (S.money < 0 ? 10 : 0) - Math.max(0, S.demand.c) * 6));
     return { res, cJobs, iJobs };
   }
+  // Почему зона не застраивается — подсказка в табло.
+  function growthNotes() {
+    const free = { 1: 0, 2: 0, 3: 0 }, far = { 1: 0, 2: 0, 3: 0 };
+    for (const ci of zoned) if (!occ[ci]) (served[ci] ? free : far)[zone[ci]]++;
+    const notes = [];
+    if (far[1] + far[2] + far[3]) notes.push('Тёмные клетки зон далеко от дороги — проведите к ним улицу.');
+    const dem = { 1: S.demand.r, 2: S.demand.c, 3: S.demand.i };
+    const why = {
+      1: 'Жильё не строится: нет спроса — нужны рабочие места (коммерция, промзона) или налог на жильё ниже.',
+      2: 'Магазины не строятся: мало жителей рядом или высок налог на коммерцию.',
+      3: 'Промзона не строится: нужна коммерция или налог на промышленность ниже.',
+    };
+    for (const t of [1, 2, 3]) if (free[t] > 3 && dem[t] <= 0.05) notes.push(why[t]);
+    return notes;
+  }
   function monthTick() {
     const { res } = economy();
     if (S.happy < 40) S.lostRes += Math.round(res * 0.002 * (40 - S.happy) / 20); // недовольные уезжают — раз в месяц
@@ -329,6 +412,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     S.money += S.balance;
     S.month++;
     renderHud();
+    if (S.month % 3 === 0) save();
   }
 
   // ---------- Центры зданий (для фото и сноса) ----------
@@ -411,6 +495,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     const data = uniforms.uBld.value.image.data;
     if (data[gid * 4] === 255) return false;
     data[gid * 4] = 255;
+    saved.demolished.add(gid);
     uniforms.uBld.value.needsUpdate = true;
     // Освобождаем клетки сетки столкновений по треугольникам этого дома.
     const G = vice.grid;
@@ -483,7 +568,8 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
   hud.innerHTML = `<div class="sim-date"></div><div class="sim-money"><b></b><small></small></div>
     <div class="sim-row"><span>Жители</span><b class="sim-pop"></b></div>
     <div class="sim-row"><span>Счастье</span><b class="sim-happy"></b></div>
-    <div class="sim-rci" title="Спрос: жильё, коммерция, промышленность">${[1, 2, 3].map(k => `<div><i style="--c:${ZONE[k].color}"><s></s></i><span>${ZONE[k].short}</span></div>`).join('')}</div>`;
+    <div class="sim-rci" title="Спрос: жильё, коммерция, промышленность">${[1, 2, 3].map(k => `<div><i style="--c:${ZONE[k].color}"><s></s></i><span>${ZONE[k].short}</span></div>`).join('')}</div>
+    <p class="sim-note" hidden></p><button class="sim-new" title="Стереть сохранение и начать город заново">Новая игра</button>`;
   document.body.append(hud);
   const TOOLS = [
     ['road', '1', 'Дорога', `${ROAD_COST} ₽/м · клик — точка, двойной клик или Enter — достроить`],
@@ -527,7 +613,19 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     hud.querySelector('.sim-happy').textContent = `${Math.round(S.happy)}%`;
     const d = [S.demand.r, S.demand.c, S.demand.i];
     hud.querySelectorAll('.sim-rci s').forEach((el, i) => { el.style.height = `${Math.abs(d[i]) * 50}%`; el.classList.toggle('neg', d[i] < 0); });
+    const notes = growthNotes(), note = hud.querySelector('.sim-note');
+    note.hidden = !notes.length;
+    note.textContent = notes.join(' ');
   }
+  let newArmed = 0;
+  hud.querySelector('.sim-new').onclick = e => {
+    if (Date.now() - newArmed < 4000) { try { localStorage.removeItem(SAVE); } catch { /* нет хранилища */ } location.reload(); return; }
+    newArmed = Date.now();
+    e.target.textContent = 'Точно? Нажмите ещё раз';
+    setTimeout(() => { e.target.textContent = 'Новая игра'; }, 4000);
+  };
+  // Деньги за задания на машине идут в бюджет города.
+  addEventListener('vologda:money', e => { S.money += e.detail; if (S.started) renderHud(); });
   function say(text, bad) { hint.textContent = text; hint.classList.toggle('bad', !!bad); }
   function selectTool(id) {
     if (id === 'tax') { tax.hidden = !tax.hidden; return; }
@@ -535,7 +633,7 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     roadPts.length = 0;
     bar.querySelectorAll('button[data-tool]').forEach(b => b.setAttribute('aria-pressed', b.dataset.tool === S.tool));
     const t = TOOLS.find(t => t[0] === S.tool);
-    say(t ? `${t[2]}: ${t[3]}` : 'Выберите инструмент. Правая кнопка — сдвинуть карту, колесо — масштаб.');
+    say(t ? `${t[2]}: ${t[3]}` : 'Выберите инструмент. Правая кнопка или два пальца на тачпаде — сдвинуть карту, колесо — масштаб.');
     updateGhost();
   }
   bar.addEventListener('click', e => { const b = e.target.closest('button[data-tool]'); if (b) selectTool(b.dataset.tool); });
@@ -560,14 +658,23 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
   let cursor = null;
 
   const spec = id => CATALOG[id];
-  const fits = (x, z, w, d) => {
-    for (let a = x - w / 2 + 1; a <= x + w / 2 - 1; a += 3) for (let b = z - d / 2 + 1; b <= z + d / 2 - 1; b += 3) {
-      if (vice.blocked(a, b) || isWater(a, b)) return false;
-      const c = zi(a, b);
-      if (c < 0 || occ[c] || road[c]) return false;
-    }
-    return true;
-  };
+  // Можно ли поставить дом (повёрнутый прямоугольник): не на доме, воде, асфальте и чужом участке. Возвращает причину отказа.
+  function blockedWhy(b) {
+    let why = null;
+    rectPoints(b, 2.5, (x, z) => {
+      if (why) return;
+      if (isWater(x, z)) why = 'вода';
+      else if (vice.blocked(x, z)) why = 'дом';
+      else if (roadInfo(x, z).d < 0.5) why = 'дорога';
+      else { const c = zi(x, z); if (c < 0 || occ[c]) why = 'занятый участок'; }
+    });
+    return why;
+  }
+  // Поворот постройки: вдоль ближайшей улицы (если она в 60 м) плюс R — на 90°.
+  function placeRot(p) {
+    const ri = roadInfo(p.x, p.z);
+    return (ri.d < 60 ? -ri.dir : 0) + S.rot * Math.PI / 2;
+  }
   function updateGhost() {
     ring.visible = ghost.visible = roadLine.visible = false;
     if (!S.active || !cursor) return;
@@ -577,11 +684,12 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
       ring.position.set(cursor.x, H(cursor.x, cursor.z) + 0.6, cursor.z);
       ring.material.color.set(t === 'bulldoze' ? '#ff3355' : ZONE[+t[1]].color);
     } else if (spec(t)) {
-      const s = spec(t), w = S.rot ? s.d : s.w, d = S.rot ? s.w : s.d;
+      const s = spec(t), rot = placeRot(cursor), b = { x: cursor.x, z: cursor.z, w: s.w, d: s.d, rot };
       ghost.visible = true;
       ghost.position.set(cursor.x, H(cursor.x, cursor.z), cursor.z);
-      ghost.scale.set(w, Math.max(1, s.floors * 3), d);
-      ghost.material.color.set(fits(cursor.x, cursor.z, w, d) && S.money >= s.cost ? '#3dff9a' : '#ff3355');
+      ghost.rotation.set(0, rot, 0);
+      ghost.scale.set(s.w, Math.max(1, s.floors * 3), s.d);
+      ghost.material.color.set(!blockedWhy(b) && S.money >= s.cost ? '#3dff9a' : '#ff3355');
     } else if (t === 'road' && roadPts.length) {
       const pts = [];
       for (let i = 0; i < roadPts.length; i += 2) pts.push(new THREE.Vector3(roadPts[i], H(roadPts[i], roadPts[i + 1]) + 1.5, roadPts[i + 1]));
@@ -629,20 +737,23 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     if (!w) return;
     S.money -= cost; S.roadLen += len;
     markRoads([w]);
+    saved.roads.push(pts);
     say(`Построено ${Math.round(len)} м дороги за ${fmt(cost)} ₽. Машины уже едут.`);
     renderHud(); updateGhost();
   }
   function bulldoze(p, e) {
     for (const k of [1, 2, 3]) for (const b of bMesh[k].list) {
-      const w = b.rot ? b.d : b.w, d = b.rot ? b.w : b.d;
-      if (Math.abs(p.x - b.x) <= w / 2 && Math.abs(p.z - b.z) <= d / 2) {
-        removeBuilding(b);
-        const back = (b.cost || 40000) * REFUND;
-        S.money += back;
-        say(`Снесено. Возврат ${fmt(back)} ₽.`);
-        renderHud();
-        return;
-      }
+      if (!inRect(b, p.x, p.z)) continue;
+      removeBuilding(b);
+      const back = (b.cost || 40000) * REFUND;
+      S.money += back;
+      say(`Снесено. Возврат ${fmt(back)} ₽.`);
+      renderHud();
+      return;
+    }
+    for (const pk of parks) if (!pk.gone && inRect(pk, p.x, p.z)) {
+      removePark(pk); S.money += CATALOG.park.cost * REFUND;
+      say(`Парк убран. Возврат ${fmt(CATALOG.park.cost * REFUND)} ₽.`); renderHud(); return;
     }
     const ci = zi(p.x, p.z);
     if (ci >= 0 && zone[ci] && !occ[ci]) { paintZone(p.x, p.z, 0); say('Зона стёрта.'); return; }
@@ -652,12 +763,13 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     if (demolishOriginal(gid)) { S.money -= DEMOLISH_COST; say(`Здание снесено за ${fmt(DEMOLISH_COST)} ₽. Участок можно застроить или отдать под зону.`); renderHud(); }
   }
   function place(id, p) {
-    const s = spec(id), w = S.rot ? s.d : s.w, d = S.rot ? s.w : s.d;
+    const s = spec(id), rot = placeRot(p), b = { x: p.x, z: p.z, w: s.w, d: s.d, rot };
     if (S.money < s.cost) { say(`Не хватает денег: ${s.name} стоит ${fmt(s.cost)} ₽`, true); return; }
-    if (!fits(p.x, p.z, w, d)) { say('Здесь занято: дом, дорога или вода.', true); return; }
+    const why = blockedWhy(b);
+    if (why) { say(`Здесь мешает: ${why}. Найдите свободное место (рамка станет зелёной) или поверните постройку клавишей R.`, true); return; }
     S.money -= s.cost;
-    if (id === 'park') addPark(p.x, p.z, S.rot ? Math.PI / 2 : 0);
-    else addBuilding({ kind: s.zone, x: p.x, z: p.z, w: s.w, d: s.d, h: s.floors * (s.zone === 2 ? 3.6 : 3), rot: S.rot ? Math.PI / 2 : 0, res: s.res, jobs: s.jobs, cost: s.cost,
+    if (id === 'park') addPark(p.x, p.z, rot);
+    else addBuilding({ kind: s.zone, x: p.x, z: p.z, w: s.w, d: s.d, h: s.floors * (s.zone === 2 ? 3.6 : 3), rot, res: s.res, jobs: s.jobs, cost: s.cost,
       color: ZONE[s.zone].palette[Math.floor(Math.random() * ZONE[s.zone].palette.length)], chimney: s.zone === 3 });
     say(`${s.name} ${s.done} за ${fmt(s.cost)} ₽.`);
     renderHud();
@@ -697,7 +809,8 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     S.active = on;
     document.body.classList.toggle('building', on);
     btn.textContent = on ? 'Выйти из стройки (B)' : 'Стройка (B)';
-    controls.mouseButtons.LEFT = on ? null : THREE.MOUSE.ROTATE;
+    controls.mouseButtons.LEFT = on ? null : THREE.MOUSE.PAN;      // в стройке левая — инструмент
+    controls.mouseButtons.RIGHT = on ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE; // а правая двигает карту
     if (on) {
       vice.exitDrive();
       if (!S.started) { S.started = true; renderHud(); }
@@ -719,6 +832,40 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
     if (t) selectTool(t[0]);
   });
 
+  // ---------- Сохранение: город переживает перезагрузку страницы ----------
+  const SAVE = 'vologda-city-v1';
+  const saved = { roads: [], demolished: new Set() };
+  function save() {
+    if (!S.started) return;
+    try {
+      localStorage.setItem(SAVE, JSON.stringify({
+        S: { money: S.money, month: S.month, addRes: S.addRes, lostRes: S.lostRes, addC: S.addC, addI: S.addI, lostJobs: S.lostJobs,
+          parks: S.parks, roadLen: S.roadLen, tax: S.tax, happy: S.happy },
+        zones: [...zoned].map(ci => [ci, zone[ci]]),
+        buildings: [1, 2, 3].flatMap(k => bMesh[k].list.map(b => ({ kind: b.kind, x: b.x, z: b.z, w: b.w, d: b.d, h: b.h, rot: b.rot,
+          res: b.res, jobs: b.jobs, cost: b.cost, color: b.color, chimney: b.chimney }))),
+        parks: parks.filter(p => !p.gone).map(p => [p.x, p.z, p.rot]),
+        roads: saved.roads, demolished: [...saved.demolished],
+      }));
+    } catch { /* хранилище недоступно или переполнено */ }
+  }
+  function load() {
+    let data = null;
+    try { data = JSON.parse(localStorage.getItem(SAVE) || 'null'); } catch { /* нет сохранения */ }
+    if (!data) return false;
+    for (const pts of data.roads || []) { const w = vice.addWay(pts); if (w) { markRoads([w]); saved.roads.push(pts); } }
+    for (const g of data.demolished || []) demolishOriginal(g);
+    for (const [ci, t] of data.zones || []) { zone[ci] = t; zoned.add(ci); }
+    for (const b of data.buildings || []) addBuilding(b, -1e9);
+    for (const [x, z, rot] of data.parks || []) addPark(x, z, rot);
+    Object.assign(S, data.S, { started: true });
+    zoneDirty = true;
+    renderHud();
+    return true;
+  }
+  addEventListener('visibilitychange', () => { if (document.hidden) save(); });
+  addEventListener('pagehide', save);
+
   // ---------- Цикл ----------
   let lastMonth = 0, lastGrow = 0, ready = false;
   function update(now) {
@@ -728,19 +875,27 @@ export function initSim({ scene, camera, controls, canvas, uniforms, pick, build
       computeCentroids();
       buildRoofs();
       loadPhotos().catch(err => console.warn('sim: список именных зданий из Wikidata не загрузился', err));
+      if (load()) console.log('sim: город загружен из сохранения');
     }
     for (const b of growing) if (!setInstance(b)) growing.delete(b);
     if (zoneDirty) redrawZones();
     if (!S.started || !ready) return;
-    if (now - lastGrow > 1500) {
+    if (now - lastGrow > 1200) {
       lastGrow = now;
       for (const [type, dem] of [[1, S.demand.r], [2, S.demand.c], [3, S.demand.i]]) {
-        const tries = dem > 0.15 ? Math.ceil(dem * 3) : 0;
-        for (let k = 0; k < tries; k++) tryGrow(type);
+        const tries = dem > 0.05 ? Math.ceil(dem * 4) : 0;
+        for (let k = 0; k < tries; k++) if (!tryGrow(type)) break;
       }
     }
     if (now - lastMonth > 4000) { lastMonth = now; monthTick(); }
   }
 
-  return { group, update, active: () => S.active, state: S };
+  // Для служебных задач (граф, прогулки): ближайшее здание к точке и его центр.
+  function nearestBuilding(x, z, r = 20) {
+    if (!centroids) return -1;
+    let best = -1, bd = r;
+    for (let g = 0; g < centroids.length / 2; g++) { const d = Math.hypot(centroids[g * 2] - x, centroids[g * 2 + 1] - z); if (d < bd) { bd = d; best = g; } }
+    return best;
+  }
+  return { group, update, active: () => S.active, state: S, nearestBuilding, centroid: g => centroids ? [centroids[g * 2], centroids[g * 2 + 1]] : null };
 }

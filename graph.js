@@ -1,16 +1,16 @@
 // The ontology graph: people, events and organisations, linked to the buildings (places) where a checked story ties
 // them (pipeline/s13_graph.py). Select points and open their buildings on the map: ./?focus=<id>,<id>.
 const TYPES = [
-  { key: 'person', ru: 'Жители' },
+  { key: 'person', ru: 'Люди' },
   { key: 'architect', ru: 'Архитекторы' },
   { key: 'event', ru: 'События' },
   { key: 'organisation', ru: 'Организации' },
   { key: 'place', ru: 'Здания' },
 ];
-// Вологдаская карта только на русском.
+// Карта Вологды — только на русском.
 const RU = {
   'Map': 'Карта', 'Graph': 'Граф', 'People, events and the buildings they touched': 'Люди, события и их дома',
-  'lede': 'Каждая линия — проверенный текст о здании: мемориальная доска, заметка слоя. Выберите одну или несколько точек и откройте их на карте.',
+  'lede': 'Каждая линия — связь из Wikidata и Википедии: кто здесь учился и работал, кто основал храм, во что входит здание. Выберите точки и откройте их на карте.',
   'hint': 'Квадратики — здания. Клик по точке выбирает её; клик по другим добавляет.',
   'Find a name': 'Найти имя', 'Clear': 'Сбросить', 'Source': 'Источник',
   'Show {n} buildings on the map': 'Показать на карте: {n}', 'Show 1 building on the map': 'Показать на карте: 1',
@@ -19,9 +19,9 @@ const RU = {
 const LANG = 'ru';
 const t = (s, n) => (RU[s] || s).replace('{n}', n);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const COLOR = { person: '#1f3f9a', architect: '#0f8a7e', event: '#d0312d', organisation: '#c98a0f', place: '#7d858c' };
+const COLOR = { person: '#1fe5ff', architect: '#3dff9a', event: '#ff2d95', organisation: '#ffcf3d', place: '#b98cff' };
 // The order points are selected in gives their colour on the map, as in the map's layers.
-const SEL_COLORS = ['#c8102e', '#1f4e8c', '#d99a12', '#2e8b57', '#7b3fa0', '#00909a', '#8c5a2b', '#d6336c'];
+const SEL_COLORS = ['#ff2d95', '#1fe5ff', '#ffcf3d', '#3dff9a', '#b98cff', '#ff8a3d', '#ff5c5c', '#7cf0ff'];
 
 fetch('data/graph.json').then(r => r.json()).then(init);
 

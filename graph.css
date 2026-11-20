@@ -1,10 +1,10 @@
 /* The graph: the same sky and paper as the map. People are blue dots, events red, organisations ochre;
    buildings are small dark squares, the same blocks the map is made of. */
 :root {
-  --sky: #e4e8ea; --paper: #fff; --ink: #000; --muted: #5d6266; --rule: #cfd5d8; --accent: #b8892a;
-  --person: #1f3f9a; --event: #d0312d; --org: #c98a0f; --place: #7d858c;
+  --sky: #140726; --paper: rgba(28, 10, 51, .94); --ink: #fbeaff; --muted: #c9a7e8; --rule: #4a2a6a; --accent: #ff2d95;
+  --person: #1fe5ff; --event: #ff2d95; --org: #ffcf3d; --place: #b98cff;
   --gutter: clamp(16px, 2.4vw, 32px);
-  font: 400 14px/1.5 "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  font: 400 14px/1.5 "Onest", "Helvetica Neue", Arial, sans-serif;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -98,3 +98,29 @@ a { color: inherit; }
   .g-panel h1, .g-lede, .g-hint { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* ---------- Неон 80-х, как на карте ---------- */
+html, body { background: radial-gradient(ellipse at 60% 30%, #2a0d4d 0%, #140726 60%, #0b0418 100%); }
+.g-home { font: 400 30px/1 "Lobster", cursive; letter-spacing: 0; color: #ffe6f3;
+  text-shadow: 0 0 6px var(--accent), 0 0 18px var(--accent), 0 0 36px rgba(255, 45, 149, .6); }
+.g-mark { background: var(--accent); color: #1c0a33; box-shadow: 0 0 12px rgba(255, 45, 149, .7); }
+.g-nav, .g-lang { background: rgba(28, 10, 51, .85); box-shadow: 0 0 0 1px var(--rule); }
+.g-nav a[aria-current] { background: #1fe5ff; color: #1c0a33; box-shadow: 0 0 12px rgba(31, 229, 255, .7); }
+.g-panel { box-shadow: 0 0 0 1px var(--rule), 0 10px 40px rgba(0, 0, 0, .5); backdrop-filter: blur(6px); }
+.g-panel h1 { font: 400 26px/1.1 "Lobster", cursive; letter-spacing: 0; color: #ffe6f3; text-shadow: 0 0 8px rgba(255, 45, 149, .7); }
+.g-search { background: rgba(255, 255, 255, .06); border-color: var(--rule); }
+.g-types button { background: rgba(255, 255, 255, .05); border-color: var(--rule); }
+.g-types i { box-shadow: 0 0 8px currentColor; }
+.g-open { color: #1c0a33; box-shadow: 0 0 14px rgba(255, 45, 149, .6); }
+.g-evidence li p { color: #e8d5f7; }
+.g-evidence li img, .g-evidence li .ph { background: #2a0d4d; }
+.g-svg .link { stroke: #8a5bd6; stroke-opacity: .45; }
+.g-svg .node text { stroke: #140726; fill: var(--ink); }
+.g-svg .node.entity.t3 text { fill: #d9c2f0; }
+.g-svg .node.entity circle { filter: drop-shadow(0 0 4px currentColor); }
+.g-svg .node.entity.t1 circle { stroke: #140726; }
+.g-svg .node.place rect { filter: drop-shadow(0 0 3px rgba(185, 140, 255, .9)); }
+.g-svg .node.place text { fill: #d9c2f0; }
+.g-svg .node.selected circle, .g-svg .node.selected rect { stroke: #fff; }
+.g-svg.focused .link.near { stroke: #ff2d95; stroke-opacity: .85; }
+.g-tip { background: rgba(28, 10, 51, .96); box-shadow: 0 0 0 1px var(--accent), 0 6px 20px rgba(0, 0, 0, .4); }

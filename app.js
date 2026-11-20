@@ -108,7 +108,7 @@ const RU = {
 };
 const t = s => RU[s] || s;
 const tr = (o, k) => o?.[k];
-const L10 = o => o?.ru || o?.en || '';
+const L10 = o => typeof o === 'string' ? o : o?.ru || o?.en || '';
 
 // ---------- Scene ----------
 const canvas = document.getElementById('scene');
@@ -121,7 +121,25 @@ const camera = new THREE.PerspectiveCamera(35, 1, 5, 60000);
 const controls = new MapControls(camera, canvas);
 controls.enableDamping = true;
 // Left drag turns and tilts the city; right drag, or Shift with the left, moves it.
-controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+// Как в картах: левая кнопка двигает город, правая (или Shift/Ctrl с левой) — поворот и наклон, колесо — масштаб.
+controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_ROTATE };
+// Тачпад: два пальца — сдвиг карты, щипок (ctrl + колесо) — масштаб. Колесо мыши (крупные целые шаги) — масштаб, как раньше.
+canvas.addEventListener('wheel', e => {
+  if (e.ctrlKey || !controls.enabled) return;
+  const mouseWheel = e.deltaMode === 1 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
+  if (mouseWheel) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  const dist = camera.position.distanceTo(controls.target);
+  const fwd = new THREE.Vector3().subVectors(controls.target, camera.position).setY(0).normalize();
+  const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
+  const k = dist * 0.0016;
+  const move = right.multiplyScalar(e.deltaX * k).add(fwd.multiplyScalar(-e.deltaY * k));
+  controls.target.add(move);
+  camera.position.add(move);
+  controls.update();
+}, { capture: true, passive: false });
 controls.rotateSpeed = 0.6;
 controls.maxPolarAngle = Math.PI * 0.47;
 controls.minDistance = 60;
@@ -628,6 +646,12 @@ function addTile(m) {
   const rows = Math.ceil(m.nB / ATTR_W);
   const data = new Float32Array(ATTR_W * 2 * rows * 4);
   data.set(m.attr);
+  // Биты слоёв берём из attrs.bin, а не из тайла: истории из Wikidata дописаны туда после нарезки тайлов.
+  for (let b = 0; b < m.nB; b++) {
+    const o = data[b * 8 + 3] * config.attrStride;
+    const l0 = attrs.getUint32(o + 20, true), l1 = attrs.getUint32(o + 24, true);
+    data[b * 8 + 4] = l0 & 0xffff; data[b * 8 + 5] = l0 >>> 16; data[b * 8 + 6] = l1 & 0xffff; data[b * 8 + 7] = l1 >>> 16;
+  }
   const tex = new THREE.DataTexture(data, ATTR_W * 2, rows, THREE.RGBAFormat, THREE.FloatType);
   tex.needsUpdate = true;
   const born = { value: performance.now() / 1000 };
@@ -706,7 +730,10 @@ function building(gid) {
   const o = gid * config.attrStride;
   const lay0 = attrs.getUint32(o + 20, true), lay1 = attrs.getUint32(o + 24, true);
   const osm = attrs.getFloat64(o, true);
+  let c = null;
+  try { c = sim.centroid(gid); } catch { /* центры домов считаются, когда город загрузится */ }
   return {
+    x: c?.[0], z: c?.[1],
     osm: osm > 0 ? `way/${osm}` : `relation/${-osm}`,
     id: String(osm),
     bag: String(osm),
@@ -879,8 +906,8 @@ function markWalk() {
   document.body.classList.toggle('walking', !!walkRoute || !!quest);
 }
 
-// Local metres <-> WGS84 through UTM zone 36N (EPSG:32636), the frame the pipeline works in.
-const UTM = { a: 6378137, f: 1 / 298.257223563, k0: 0.9996, lon0: 33 * Math.PI / 180, E0: 500000 };
+// Local metres <-> WGS84 through UTM zone 37N (EPSG:32637), the frame the pipeline works in for Vologda.
+const UTM = { a: 6378137, f: 1 / 298.257223563, k0: 0.9996, lon0: 39 * Math.PI / 180, E0: 500000 };
 function toLatLon(x, z) {
   const E = x + config.origin[0] - UTM.E0, N = config.origin[1] - z;
   const { a, f, k0 } = UTM, e2 = f * (2 - f), ep2 = e2 / (1 - e2);
@@ -2127,4 +2154,4 @@ renderer.setAnimationLoop(now => {
 });
 
 
-window.__dbg = { pick, uniforms, camera, controls, setLayer, layers, pinCard, showCard, building, labelGroup, labels, flyTo, startPlay, gidOf };
+window.__dbg = { pick, uniforms, camera, controls, setLayer, layers, pinCard, showCard, building, labelGroup, labels, flyTo, startPlay, gidOf, sim, vice, config, toLatLon, fromLatLon };

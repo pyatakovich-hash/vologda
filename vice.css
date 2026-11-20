@@ -71,7 +71,24 @@ body.driving .game-hud { display: block; }
 .g-goal { position: fixed; left: 50%; bottom: 70px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px;
   padding: 8px 16px; border-radius: 999px; background: rgba(20, 2, 46, .8); box-shadow: 0 0 0 1px var(--neon-pink); font-size: 15px; white-space: nowrap; }
 .g-arrow { display: inline-block; font-style: normal; font-size: 22px; color: var(--neon-yellow, #ffe45c); text-shadow: 0 0 8px #ffe45c; }
-.g-help { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); margin: 0; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.g-help { position: fixed; right: var(--gutter); bottom: 22px; max-width: min(520px, calc(100vw - 260px)); margin: 0; font-size: 12px; line-height: 1.4;
+  color: var(--muted); text-align: right; }
+@media (max-width: 720px) { .g-help { display: none; } }
+.g-goal[hidden], .g-menu[hidden] { display: none; }
+.g-task { position: fixed; top: calc(var(--gutter) + 50px); left: 50%; transform: translateX(-50%); font: 400 24px/1.1 "Lobster", cursive; color: #ffe6f3; white-space: nowrap;
+  text-shadow: 0 0 8px var(--neon-pink), 0 0 20px rgba(255, 45, 149, .6); }
+.g-menu { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 45; display: flex; flex-direction: column; gap: 10px;
+  width: min(460px, 92vw); padding: 18px; border-radius: 16px; background: rgba(22, 6, 42, .94); box-shadow: 0 0 0 1px var(--neon-pink), 0 0 40px rgba(255, 45, 149, .35); }
+.g-menu > b { font: 400 34px/1 "Lobster", cursive; color: #ffe6f3; text-shadow: 0 0 10px var(--neon-pink); text-align: center; }
+.g-menu > small { font-size: 12px; color: var(--muted); text-align: center; }
+.g-list { display: flex; flex-direction: column; gap: 6px; }
+.g-list button { display: grid; grid-template-columns: 26px 1fr; column-gap: 10px; align-items: center; padding: 9px 12px; border: 0; border-radius: 10px;
+  background: rgba(255, 255, 255, .05); color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.g-list button:hover, .g-list button:focus-visible { background: rgba(255, 45, 149, .18); outline: none; box-shadow: 0 0 0 1px var(--neon-pink); }
+.g-list kbd { grid-row: span 2; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 6px; background: var(--neon-cyan); color: #10061f;
+  font: 700 14px/1 "Onest", sans-serif; }
+.g-list b { font-size: 16px; color: #fff; }
+.g-list span { font-size: 12px; color: var(--muted); }
 
 .radio-name { position: fixed; top: 84px; left: 50%; transform: translateX(-50%); z-index: 40; pointer-events: none; text-align: center;
   display: flex; flex-direction: column; align-items: center; animation: vice-in .4s ease-out; }
@@ -115,6 +132,10 @@ body.building .sim-tax:not([hidden]) { display: grid; }
 .sim-rci i::after { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: rgba(255, 255, 255, .3); }
 .sim-rci s { position: absolute; left: 0; right: 0; bottom: 50%; background: var(--c); box-shadow: 0 0 8px var(--c); }
 .sim-rci s.neg { bottom: auto; top: 50%; background: #ff3355; box-shadow: none; }
+.sim-note { max-width: 230px; margin: 6px 0 0; font-size: 12px; line-height: 1.35; color: #ffe08a; }
+.sim-new { align-self: flex-start; margin-top: 6px; padding: 4px 9px; border: 1px solid rgba(255, 255, 255, .25); border-radius: 7px;
+  background: transparent; color: var(--muted); font: 500 12px/1.2 "Onest", sans-serif; cursor: pointer; }
+.sim-new:hover { color: #fff; border-color: var(--neon-pink); }
 
 .sim-bar { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 18px); transform: translateX(-50%); z-index: 20;
   gap: 4px; padding: 6px; border-radius: 14px; background: rgba(20, 4, 40, .9); box-shadow: 0 0 0 1px rgba(255, 45, 149, .5), 0 0 20px rgba(255, 45, 149, .25);
