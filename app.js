@@ -3,6 +3,7 @@ import { MapControls } from './vendor/MapControls.js';
 import { initBasemap } from './basemap.js';
 import { initVice, tintBasemap } from './vice.js';
 import { loadTerrain, drapeBasemap } from './terrain.js';
+import { initSim } from './sim.js';
 
 // Colours are authored in sRGB and drawn as they are.
 THREE.ColorManagement.enabled = false;
@@ -294,6 +295,10 @@ const uniforms = {
   // Рельеф (terrain.js): сетка высот и её рамка (minX, minZ, шаг, n); n = 0 — рельефа нет.
   uTerrain: { value: new THREE.DataTexture(new Float32Array(1), 1, 1, THREE.RedFormat, THREE.FloatType) },
   uTerr: { value: new THREE.Vector4(0, 0, 1, 0) },
+  // Стройка и фото (sim.js): по текселю на здание — R: снесено (255), G: номер фото в атласе + 1.
+  uBld: { value: (() => { const t = new THREE.DataTexture(new Uint8Array(ATTR_W * Math.ceil(config.stats.buildings / ATTR_W) * 4), ATTR_W, Math.ceil(config.stats.buildings / ATTR_W), THREE.RGBAFormat, THREE.UnsignedByteType); t.needsUpdate = true; return t; })() },
+  uAtlas: { value: new THREE.DataTexture(new Uint8Array(4), 1, 1, THREE.RGBAFormat) },
+  uAtlasN: { value: 1 },
 };
 loadTerrain(config).then(t => {
   uniforms.uTerrain.value = t.texture;
@@ -301,6 +306,8 @@ loadTerrain(config).then(t => {
   basemapP.then(g => drapeBasemap(g, t.H, t.exag));
   resolveTerrain(t);
 }).catch(e => { console.warn('terrain: рельеф не загрузился', e); resolveTerrain(null); });
+// Режим стройки (sim.js): зоны, рост, дороги, снос, бюджет, фото фасадов.
+const sim = initSim({ scene, camera, controls, canvas, uniforms, pick: (x, y) => pick(x, y), building: g => building(g), getMeshes: () => meshes, config, vice });
 const PICK_ROWS = Math.ceil(config.stats.buildings / ATTR_W);
 const pickData = new Uint8Array(ATTR_W * PICK_ROWS);
 const pickTex = new THREE.DataTexture(pickData, ATTR_W, PICK_ROWS, THREE.RedFormat, THREE.UnsignedByteType);
@@ -326,6 +333,9 @@ const VERT = /* glsl */`
   out vec3 vWorld;
   out float vKind; // 1 — храм, 2 — деревянный дом, 3 — известное здание (есть статья)
   out float vGround;
+  out float vSlot;
+  out float vFloorsH;
+  uniform sampler2D uBld;
   uniform sampler2D uTerrain;
   uniform vec4 uTerr;
   float terrainAt(vec2 xz) {
@@ -363,6 +373,11 @@ const VERT = /* glsl */`
     ${periods.slice(0, -1).map((p, i) => `if (year < ${p.to + 1}.0) period = min(period, ${i});`).join('\n    ')}
     int flag = pf / 16;
     vGid = a.w;
+    int gidI = int(a.w + 0.5);
+    vec4 bs = texelFetch(uBld, ivec2(gidI % ${ATTR_W}, gidI / ${ATTR_W}), 0);
+    if (bs.r > 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; } // снесено в режиме стройки
+    vSlot = floor(bs.g * 255.0 + 0.5);
+    vFloorsH = max(a.z, 1.0) * 3.0;
     bool unknown = flag == 5;
     bool filtered = uMode < 0.5 && (unknown ? uUnknown < 0.5 : uMask[period] < 0.5);
     float g = clamp((uYear - year + 1.0) / uRise, 0.0, 1.0);
@@ -427,6 +442,10 @@ const FRAG = /* glsl */`
   in float vGid;
   in float vKind;
   in float vGround;
+  in float vSlot;
+  in float vFloorsH;
+  uniform sampler2D uAtlas;
+  uniform float uAtlasN;
   out vec4 outColor;
   void main() {
     #ifdef PICK
@@ -443,8 +462,16 @@ const FRAG = /* glsl */`
       float d = length(vWorld - cameraPosition);
       // Ночные окна: сетка по стенам, часть горит тёплым светом, редкие — неоном.
       float wnear = 1.0 - smoothstep(500.0, 1400.0, d);
-      // Известные здания: своя фактура стен и кровли (вблизи; издалека остаётся цвет эпохи).
-      if (vKind > 0.5 && wnear > 0.0) {
+      // Фото с Викисклада на стенах здания (атлас 8×8; фото повторяется по ширине фасада).
+      if (vSlot > 0.5 && abs(n.y) < 0.3 && wnear > 0.0) {
+        vec2 t = normalize(vec2(-n.z, n.x));
+        float H0 = max(vFloorsH, 6.0);
+        float pu = fract(dot(vWorld.xz, t) / (H0 * 1.4)), pv = fract(hy / H0); // выше — фото повторяется, без растянутых полос
+        float s = vSlot - 1.0, cx = mod(s, uAtlasN), cy = floor(s / uAtlasN);
+        vec2 uv = vec2((cx + 0.02 + pu * 0.96) / uAtlasN, 1.0 - (cy + 1.0 - (0.02 + pv * 0.96)) / uAtlasN);
+        vec3 ph = texture(uAtlas, uv).rgb;
+        c = mix(c, ph * (0.72 + 0.28 * sun) * 1.12, wnear);
+      } else if (vKind > 0.5 && wnear > 0.0) {
         vec2 t = normalize(vec2(-n.z, n.x));
         float u = dot(vWorld.xz, t), y = hy;
         if (abs(n.y) < 0.3) {
@@ -560,6 +587,8 @@ function pick(x, y) {
   flat.visible = false;
   labelGroup.visible = false;
   vice.group.visible = false;
+  const noPick = scene.children.filter(c => c.userData.noPick && c.visible);
+  noPick.forEach(c => { c.visible = false; });
   const bg = scene.background;
   scene.background = null;
   renderer.setRenderTarget(pickTarget);
@@ -572,6 +601,7 @@ function pick(x, y) {
   flat.visible = true;
   labelGroup.visible = true;
   vice.group.visible = true;
+  noPick.forEach(c => { c.visible = true; });
   scene.background = bg;
   for (const m of meshes) m.material = m.userData.draw;
   camera.clearViewOffset();
@@ -1998,6 +2028,7 @@ renderer.setAnimationLoop(now => {
   uniforms.uFog.value.set(dist * 1.6, dist * 4);
   if (frame % 6 === 0) updateLabels(dist);
   vice.update(now);
+  sim.update(now);
   if (playing) {
     const t = Math.min(1, playT0 + (now - playStart) / DURATION);
     uniforms.uYear.value = playYear(t);
@@ -2006,7 +2037,7 @@ renderer.setAnimationLoop(now => {
     if (t >= 1) stopPlay();
     drawHist();
   }
-  if (pointer && !dragging && frame % 3 === 0 && !vice.driving()) {
+  if (pointer && !dragging && frame % 3 === 0 && !vice.driving() && !sim.active()) {
     const gid = pick(pointer[0], pointer[1]);
     uniforms.uHover.value = gid;
     showCard(gid, pointer[0], pointer[1]);

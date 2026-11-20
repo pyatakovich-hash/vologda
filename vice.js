@@ -661,6 +661,13 @@ function waterGeometry(polys, H) {
   g.setIndex(idx);
   return g;
 }
+// Маска воды для других модулей (стройка не даёт зонировать реку).
+let WATER = null;
+export function isWater(x, z) {
+  if (!WATER) return false;
+  const ix = Math.floor((x + WATER.half) / WATER.c), iz = Math.floor((z + WATER.half) / WATER.c);
+  return ix >= 0 && iz >= 0 && ix < WATER.n && iz < WATER.n && WATER.mask[iz * WATER.n + ix] === 1;
+}
 function embankmentGeometry(polys, H, rivers = [], nearRoad = () => false) {
   const pos = [], col = [], idx = [];
   const quad = (a, b, c2, d, rgb) => {
@@ -697,6 +704,7 @@ function embankmentGeometry(polys, H, rivers = [], nearRoad = () => false) {
       if (ix >= 0 && iz >= 0 && ix < N && iz < N) mask[iz * N + ix] = 1;
     }
   }
+  WATER = { mask, n: N, c: C, half: HALF };
   const wet = (x, z) => { const ix = Math.floor((x + HALF) / C), iz = Math.floor((z + HALF) / C); return ix >= 0 && iz >= 0 && ix < N && iz < N && mask[iz * N + ix] === 1; };
   for (const P of polys) {
     const e = P.edges;
@@ -973,7 +981,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
     }
     if (domes.length) {
       const dm = new THREE.InstancedMesh(domeGeometry(), basic(), domes.length);
-      domes.forEach(([x, y, z, R], i) => { o.position.set(x, y, z); o.rotation.set(0, 0, 0); o.scale.setScalar(R); o.updateMatrix(); dm.setMatrixAt(i, o.matrix); });
+      domes.forEach(([x, y, z, R], i) => { o.position.set(x, y, z); o.rotation.set(0, 0, 0); o.scale.setScalar(R); o.updateMatrix(); dm.setMatrixAt(i, o.matrix); landmarks.push({ x, z, inst: dm, i }); });
       dm.frustumCulled = false;
       group.add(dm);
     }
@@ -985,10 +993,12 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
       m.position.set(x, y + 4.5, z);
       m.rotation.y = Math.atan2(-x, -z); // лицом к центру города
       group.add(m);
+      landmarks.push({ x, z, obj: m });
     });
     console.log(`vice: ${domes.length} куполов, ${Math.min(signs.length, SIGNS.length)} вывесок`);
   }
 
+  const landmarks = []; // купола, вывески на крышах и магазинах — их убирает снос здания
   let net = null, agents = [], last = 0, drive = false, propsDone = false, lastShout = 0;
   let waterMat = null, shopData = [];
   fetchRoads(config.origin).then(data => {
@@ -1041,6 +1051,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
       m.position.set(px, H(px, pz) + 6.5, pz);
       m.rotation.y = Math.atan2(rx, rz);
       group.add(m);
+      landmarks.push({ x: sh.x, z: sh.z, obj: m });
       signs.push([px, pz, color]);
     });
     // Пятно света под каждой вывеской.
@@ -1311,7 +1322,7 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
   addEventListener('keydown', e => {
     if (e.target.closest?.('input, textarea, [contenteditable]')) return;
     const k = e.key.toLowerCase();
-    if (k === 'f' || k === 'а') { toggleDrive(); return; }
+    if (k === 'f' || k === 'а') { if (!document.body.classList.contains('building')) toggleDrive(); return; }
     if (!game.driving) return;
     const map = { 'ц': 'w', 'ы': 's', 'ф': 'a', 'в': 'd', 'й': 'q', 'у': 'e' };
     const kk = map[k] || k;
@@ -1345,5 +1356,39 @@ export function initVice(scene, config, camera, controls, getMeshes = () => [], 
     }
   });
 
-  return { group, update, driving: () => game.driving };
+  // ---------- API для режима стройки (sim.js) ----------
+  function addWay(points) {
+    if (!net) return null;
+    const ids = [];
+    for (let i = 0; i < points.length; i += 2) ids.push(`${Math.round(points[i] / SNAP)},${Math.round(points[i + 1] / SNAP)}`);
+    const w = { p: points, n: ids, f: 0, k: 1, own: true };
+    let len = 0;
+    for (let i = 2; i < points.length; i += 2) len += Math.hypot(points[i] - points[i - 2], points[i + 1] - points[i - 1]);
+    w.len = len;
+    const wi = net.ways.push(w) - 1;
+    ids.forEach((id, k) => { if (!net.nodes.has(id)) net.nodes.set(id, []); net.nodes.get(id).push([wi, k]); });
+    const mesh = new THREE.Mesh(roadGeometry([w], H), new THREE.MeshBasicMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+    mesh.renderOrder = -1;
+    group.add(mesh);
+    // Пара машин сразу заезжает на новую улицу.
+    for (let k = 0; k < agents.length && k < N_CARS; k += Math.ceil(N_CARS / 6)) { const a = agents[k]; a.w = wi; a.i = 0; a.dir = 1; a.d = 0; }
+    return w;
+  }
+  function setCells(x0, z0, x1, z1, v) {
+    if (!G.cells) return;
+    const a = Math.max(0, Math.floor((Math.min(x0, x1) + G.half) / G.size)), b = Math.min(G.n - 1, Math.floor((Math.max(x0, x1) + G.half) / G.size));
+    const c0 = Math.max(0, Math.floor((Math.min(z0, z1) + G.half) / G.size)), d = Math.min(G.n - 1, Math.floor((Math.max(z0, z1) + G.half) / G.size));
+    for (let iz = c0; iz <= d; iz++) G.cells.fill(v, iz * G.n + a, iz * G.n + b + 1);
+  }
+  function hideLandmarksNear(x, z, r) {
+    for (const L of landmarks) {
+      if (Math.hypot(L.x - x, L.z - z) > r) continue;
+      if (L.obj) L.obj.visible = false;
+      else { o.position.set(0, -1e4, 0); o.scale.setScalar(0); o.updateMatrix(); L.inst.setMatrixAt(L.i, o.matrix); L.inst.instanceMatrix.needsUpdate = true; }
+    }
+  }
+  return {
+    group, update, driving: () => game.driving, exitDrive: () => { if (game.driving) toggleDrive(); },
+    H: (x, z) => H(x, z), blocked, grid: G, setCells, addWay, getNet: () => net, hideLandmarksNear, ready: () => !!net && propsDone,
+  };
 }
